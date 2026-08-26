@@ -276,6 +276,44 @@ public class MauiEnvironmentHelperTests
         Assert.Equal("colon", property.Value);
     }
 
+    [Fact]
+    public void AddEnvironmentPropertyGroup_EscapesMSBuildSyntaxInValues()
+    {
+        // Values containing MSBuild syntax must be surfaced literally, not expanded. MSBuild un-escapes the
+        // %XX sequences when the property is consumed, so these encoded values yield the original text.
+        var envVars = new Dictionary<string, string>
+        {
+            ["PROPERTY_REF"] = "$(Configuration)",
+            ["ITEM_REF"] = "@(Compile)",
+            ["LITERAL_PERCENT"] = "50%$(Foo)"
+        };
+
+        var projectElement = new XElement("Project");
+        MauiEnvironmentHelper.AddEnvironmentPropertyGroup(projectElement, envVars, NullLogger.Instance);
+
+        var propertyGroup = projectElement.Elements("PropertyGroup").Single();
+
+        Assert.Equal("%24%28Configuration%29", propertyGroup.Element("PROPERTY_REF")?.Value);
+        Assert.Equal("%40%28Compile%29", propertyGroup.Element("ITEM_REF")?.Value);
+        // '%' is encoded first so the escapes introduced for '$'/'(' are not re-decoded by MSBuild.
+        Assert.Equal("50%25%24%28Foo%29", propertyGroup.Element("LITERAL_PERCENT")?.Value);
+    }
+
+    [Theory]
+    [InlineData("plain-value", "plain-value")]
+    [InlineData("$(Configuration)", "%24%28Configuration%29")]
+    [InlineData("@(Compile)", "%40%28Compile%29")]
+    [InlineData("50%off", "50%25off")]
+    [InlineData("a;b", "a%3Bb")]
+    [InlineData("it's", "it%27s")]
+    [InlineData("a*b?c", "a%2Ab%3Fc")]
+    [InlineData("", "")]
+    public void EscapeMSBuildPropertyValue_EncodesMetacharacters(string input, string expected)
+    {
+        var result = MauiEnvironmentHelper.EscapeMSBuildPropertyValue(input);
+        Assert.Equal(expected, result);
+    }
+
     [Theory]
     [InlineData("simple-value", "simple-value", false)]
     [InlineData("has;semicolons", "has%3Bsemicolons", true)]

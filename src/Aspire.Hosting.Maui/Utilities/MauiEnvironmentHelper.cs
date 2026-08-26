@@ -5,6 +5,7 @@
 
 using System.Globalization;
 using System.Text;
+using System.Xml;
 using System.Xml.Linq;
 using Aspire.Hosting.ApplicationModel;
 using Microsoft.Extensions.Logging;
@@ -143,11 +144,7 @@ internal static class MauiEnvironmentHelper
 
         projectElement.Add(targetElement);
 
-        var document = new XDocument(new XDeclaration("1.0", "utf-8", "yes"), projectElement);
-
-        using var stringWriter = new StringWriter();
-        document.Save(stringWriter);
-        return stringWriter.ToString();
+        return SerializeProject(projectElement);
     }
 
     private static void PruneOldGeneratedFiles(string directory, ILogger logger)
@@ -225,11 +222,7 @@ internal static class MauiEnvironmentHelper
 
         AddEnvironmentPropertyGroup(projectElement, environmentVariables, logger);
 
-        var document = new XDocument(new XDeclaration("1.0", "utf-8", "yes"), projectElement);
-
-        using var stringWriter = new StringWriter();
-        document.Save(stringWriter);
-        return stringWriter.ToString();
+        return SerializeProject(projectElement);
     }
 
     /// <summary>
@@ -243,8 +236,9 @@ internal static class MauiEnvironmentHelper
     /// unchanged, otherwise invalid characters are replaced with '_'. Because that encoding (and MSBuild's
     /// case-insensitive property names) can map two distinct variables to the same property name, collisions
     /// are detected and only the first variable is emitted; the rest are logged rather than silently
-    /// overwriting each other. Values are written verbatim; XML special characters are escaped automatically
-    /// by <see cref="XElement"/>.
+    /// overwriting each other. Values are escaped via <see cref="EscapeMSBuildPropertyValue"/> so MSBuild
+    /// syntax in a value (such as <c>$(Configuration)</c>) is preserved literally instead of expanding; XML
+    /// special characters are escaped automatically by <see cref="XElement"/>.
     /// </remarks>
     internal static void AddEnvironmentPropertyGroup(XElement projectElement, Dictionary<string, string> environmentVariables, ILogger logger)
     {
@@ -278,7 +272,7 @@ internal static class MauiEnvironmentHelper
                 continue;
             }
 
-            propertyGroup.Add(new XElement(propertyName, value));
+            propertyGroup.Add(new XElement(propertyName, EscapeMSBuildPropertyValue(value)));
         }
 
         projectElement.Add(propertyGroup);
@@ -297,6 +291,66 @@ internal static class MauiEnvironmentHelper
         return value
             .Replace("%", "%25", StringComparison.Ordinal)
             .Replace(";", "%3B", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Escapes MSBuild metacharacters in an environment value so it is surfaced as a literal MSBuild property
+    /// value rather than being interpreted as MSBuild syntax (for example a value of <c>$(Configuration)</c>
+    /// or <c>@(Compile)</c> must not expand).
+    /// </summary>
+    /// <remarks>
+    /// MSBuild un-escapes <c>%XX</c> hex sequences when a property is consumed, so encoding the special
+    /// characters here yields the original literal value at use time. <c>%</c> is encoded first so the escapes
+    /// introduced for the other characters are not themselves re-decoded.
+    /// </remarks>
+    internal static string EscapeMSBuildPropertyValue(string value)
+    {
+        // Matches MSBuild's escaping set (Microsoft.Build.Shared.EscapingUtilities): the characters that carry
+        // syntactic meaning in an MSBuild property value.
+        if (value.AsSpan().IndexOfAny("%$@();'*?") < 0)
+        {
+            return value;
+        }
+
+        var builder = new StringBuilder(value.Length);
+        foreach (var c in value)
+        {
+            switch (c)
+            {
+                case '%':
+                    builder.Append("%25");
+                    break;
+                case '$':
+                    builder.Append("%24");
+                    break;
+                case '@':
+                    builder.Append("%40");
+                    break;
+                case '(':
+                    builder.Append("%28");
+                    break;
+                case ')':
+                    builder.Append("%29");
+                    break;
+                case ';':
+                    builder.Append("%3B");
+                    break;
+                case '\'':
+                    builder.Append("%27");
+                    break;
+                case '*':
+                    builder.Append("%2A");
+                    break;
+                case '?':
+                    builder.Append("%3F");
+                    break;
+                default:
+                    builder.Append(c);
+                    break;
+            }
+        }
+
+        return builder.ToString();
     }
 
     /// <summary>
@@ -394,10 +448,26 @@ internal static class MauiEnvironmentHelper
             )
         ));
 
-        var document = new XDocument(new XDeclaration("1.0", "utf-8", "yes"), projectElement);
+        return SerializeProject(projectElement);
+    }
+
+    // MSBuild reads these files as UTF-8 (both callers write them with Encoding.UTF8). XDocument.Save emits an
+    // XML declaration matching the writer's UTF-16 encoding, which would mislabel the persisted UTF-8 bytes and
+    // can make MSBuild reject the import, so omit the declaration entirely (it is optional for MSBuild files).
+    private static string SerializeProject(XElement projectElement)
+    {
+        var settings = new XmlWriterSettings
+        {
+            OmitXmlDeclaration = true,
+            Indent = true,
+        };
 
         using var stringWriter = new StringWriter();
-        document.Save(stringWriter);
+        using (var xmlWriter = XmlWriter.Create(stringWriter, settings))
+        {
+            projectElement.Save(xmlWriter);
+        }
+
         return stringWriter.ToString();
     }
 }
