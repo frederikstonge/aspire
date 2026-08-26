@@ -76,17 +76,17 @@ internal sealed class MauiAndroidEnvironmentSubscriber(
 
         try
         {
-            // Add a CommandLineArgsCallback that will generate the targets file
+            // Add a CommandLineArgsCallback that will generate the MSBuild files
             // This runs AFTER all environment callbacks have been processed
-            // The callback itself ensures idempotency by only generating the file once
-            string? generatedFilePath = null;
+            // The callback itself ensures idempotency by only generating the files once
+            (string? PropsFilePath, string? TargetsFilePath)? generatedFiles = null;
 
             resource.Annotations.Add(new CommandLineArgsCallbackAnnotation(async context =>
             {
-                // Only generate the file once, even if this callback is invoked multiple times
-                if (generatedFilePath is null)
+                // Only generate the files once, even if this callback is invoked multiple times
+                if (generatedFiles is null)
                 {
-                    generatedFilePath = await MauiEnvironmentHelper.CreateAndroidEnvironmentTargetsFileAsync(
+                    generatedFiles = await MauiEnvironmentHelper.CreateAndroidEnvironmentFilesAsync(
                         fileSystemService,
                         resource,
                         executionContext,
@@ -94,17 +94,27 @@ internal sealed class MauiAndroidEnvironmentSubscriber(
                         cancellationToken
                     ).ConfigureAwait(false);
 
-                    if (generatedFilePath is not null)
+                    if (generatedFiles.Value.PropsFilePath is not null || generatedFiles.Value.TargetsFilePath is not null)
                     {
-                        logger.LogInformation("Generated environment targets file for Android: {Path}", generatedFilePath);
+                        logger.LogInformation(
+                            "Generated environment files for Android (props: {Props}, targets: {Targets})",
+                            generatedFiles.Value.PropsFilePath,
+                            generatedFiles.Value.TargetsFilePath);
                     }
                 }
 
-                if (generatedFilePath is not null)
+                // The props file is imported early (before the project body) so the environment values are
+                // visible to project-level property definitions and conditions.
+                if (generatedFiles.Value.PropsFilePath is not null)
                 {
-                    // Add the targets file as an MSBuild property via command-line argument
-                    var commandLineArg = $"-p:CustomAfterMicrosoftCommonTargets={generatedFilePath}";
-                    context.Args.Add(commandLineArg);
+                    context.Args.Add($"-p:CustomBeforeMicrosoftCommonProps={generatedFiles.Value.PropsFilePath}");
+                }
+
+                // The targets file is imported late so the AndroidEnvironment launch item hooks run after
+                // the common targets have defined them.
+                if (generatedFiles.Value.TargetsFilePath is not null)
+                {
+                    context.Args.Add($"-p:CustomAfterMicrosoftCommonTargets={generatedFiles.Value.TargetsFilePath}");
                 }
             }));
 

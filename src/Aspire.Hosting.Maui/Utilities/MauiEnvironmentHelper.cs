@@ -22,15 +22,21 @@ namespace Aspire.Hosting.Maui.Utilities;
 internal static class MauiEnvironmentHelper
 {
     /// <summary>
-    /// Creates an MSBuild targets file for Android that sets environment variables.
+    /// Creates the MSBuild files that expose an Android resource's environment variables both to the
+    /// project build (as properties) and to the Android launch tooling (as <c>AndroidEnvironment</c> items).
     /// </summary>
     /// <param name="fileSystemService">The file system service for managing temp files.</param>
     /// <param name="resource">The resource to collect environment variables from.</param>
     /// <param name="executionContext">The execution context.</param>
     /// <param name="logger">Logger for diagnostic output.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The path to the generated targets file, or null if no environment variables are present.</returns>
-    public static async Task<string?> CreateAndroidEnvironmentTargetsFileAsync(
+    /// <returns>
+    /// The paths of the generated props and targets files, or nulls if no environment variables are present.
+    /// The props file is meant to be imported early (via <c>CustomBeforeMicrosoftCommonProps</c>) so its
+    /// properties are visible to the project body; the targets file is imported late (via
+    /// <c>CustomAfterMicrosoftCommonTargets</c>) so the Android launch item hooks run after the common targets.
+    /// </returns>
+    public static async Task<(string? PropsFilePath, string? TargetsFilePath)> CreateAndroidEnvironmentFilesAsync(
         IFileSystemService fileSystemService,
         IResource resource,
         DistributedApplicationExecutionContext executionContext,
@@ -53,29 +59,28 @@ internal static class MauiEnvironmentHelper
             environmentVariables[normalizedKey] = envVar.Value;
         }
 
-        // If no environment variables, return null
+        // If no environment variables, return nulls
         if (environmentVariables.Count == 0)
         {
-            return null;
+            return (null, null);
         }
 
-        // Create a temporary targets file
+        // Create a temporary directory to hold the generated props and targets files
         var tempDirectory = fileSystemService.TempDirectory.CreateTempSubdirectory("aspire-maui-android-env").Path;
 
-        // Prune old targets files
-        PruneOldTargets(tempDirectory, logger);
+        // Prune old generated files
+        PruneOldGeneratedFiles(tempDirectory, logger);
 
         var sanitizedName = SanitizeFileName(resource.Name + "-android");
         var uniqueId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+
+        var propsFilePath = Path.Combine(tempDirectory, $"{sanitizedName}-{uniqueId}.props");
+        await File.WriteAllTextAsync(propsFilePath, GenerateEnvironmentPropsFileContent(environmentVariables, logger), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+
         var targetsFilePath = Path.Combine(tempDirectory, $"{sanitizedName}-{uniqueId}.targets");
+        await File.WriteAllTextAsync(targetsFilePath, GenerateAndroidTargetsFileContent(environmentVariables), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
 
-        // Generate the targets file content
-        var targetsContent = GenerateAndroidTargetsFileContent(environmentVariables);
-
-        // Write the file
-        await File.WriteAllTextAsync(targetsFilePath, targetsContent, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
-
-        return targetsFilePath;
+        return (propsFilePath, targetsFilePath);
     }
 
     /// <summary>
@@ -91,10 +96,6 @@ internal static class MauiEnvironmentHelper
             new XAttribute("Project", "$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.After.Microsoft.Common.targets"),
             new XAttribute("Condition", "Exists('$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.After.Microsoft.Common.targets')")
         ));
-
-        // Also surface the environment variables as MSBuild properties so they can be consumed by the
-        // project build itself (e.g. in $(NAME) references or property conditions), not just the launch tooling.
-        AddEnvironmentPropertyGroup(projectElement, environmentVariables);
 
         // Create an ItemGroup for AndroidEnvironment files to be generated
         var itemGroup = new XElement("ItemGroup");
@@ -149,13 +150,20 @@ internal static class MauiEnvironmentHelper
         return stringWriter.ToString();
     }
 
-    private static void PruneOldTargets(string directory, ILogger logger)
+    private static void PruneOldGeneratedFiles(string directory, ILogger logger)
     {
         var expiration = DateTimeOffset.UtcNow - TimeSpan.FromDays(1);
         var deletedFiles = new List<string>();
 
-        foreach (var file in Directory.EnumerateFiles(directory, "*.targets", SearchOption.TopDirectoryOnly))
+        // Both the early ".props" and the late ".targets" files are generated per run, so prune both.
+        foreach (var file in Directory.EnumerateFiles(directory, "*.*", SearchOption.TopDirectoryOnly))
         {
+            if (!file.EndsWith(".props", StringComparison.OrdinalIgnoreCase) &&
+                !file.EndsWith(".targets", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             try
             {
                 var info = new FileInfo(file);
@@ -167,13 +175,13 @@ internal static class MauiEnvironmentHelper
             }
             catch (Exception ex)
             {
-                logger.LogDebug(ex, "Failed to prune stale Android environment targets file '{TargetsFile}'.", file);
+                logger.LogDebug(ex, "Failed to prune stale MAUI environment file '{File}'.", file);
             }
         }
 
         if (deletedFiles.Count > 0)
         {
-            logger.LogDebug("Pruned {Count} stale Android environment targets file(s): {Files}", deletedFiles.Count, string.Join(", ", deletedFiles));
+            logger.LogDebug("Pruned {Count} stale MAUI environment file(s): {Files}", deletedFiles.Count, string.Join(", ", deletedFiles));
         }
     }
 
@@ -198,6 +206,33 @@ internal static class MauiEnvironmentHelper
     }
 
     /// <summary>
+    /// Generates the content of an MSBuild <c>.props</c> file that exposes the environment variables as
+    /// MSBuild properties. This file is imported early (via <c>CustomBeforeMicrosoftCommonProps</c>) so the
+    /// values are visible to project-level property definitions and conditions, unlike the late
+    /// <c>.targets</c> import which only carries the platform launch items.
+    /// </summary>
+    internal static string GenerateEnvironmentPropsFileContent(Dictionary<string, string> environmentVariables, ILogger logger)
+    {
+        var projectElement = new XElement("Project");
+
+        // Re-import the default Custom.Before.Microsoft.Common.props so overriding
+        // CustomBeforeMicrosoftCommonProps via -p: does not suppress a user-provided extension file.
+        projectElement.Add(new XElement(
+            "Import",
+            new XAttribute("Project", "$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.Before.Microsoft.Common.props"),
+            new XAttribute("Condition", "Exists('$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.Before.Microsoft.Common.props')")
+        ));
+
+        AddEnvironmentPropertyGroup(projectElement, environmentVariables, logger);
+
+        var document = new XDocument(new XDeclaration("1.0", "utf-8", "yes"), projectElement);
+
+        using var stringWriter = new StringWriter();
+        document.Save(stringWriter);
+        return stringWriter.ToString();
+    }
+
+    /// <summary>
     /// Adds a <c>PropertyGroup</c> that exposes each environment variable as an MSBuild property so the
     /// values injected by Aspire are visible to the project build itself (for example in <c>$(NAME)</c>
     /// references or property conditions), not just to the platform launch tooling.
@@ -205,12 +240,22 @@ internal static class MauiEnvironmentHelper
     /// <remarks>
     /// Environment variable names are encoded to valid MSBuild property identifiers via
     /// <see cref="EnvironmentVariableNameEncoder.Encode(string)"/>: names that are already valid are used
-    /// unchanged, otherwise invalid characters are replaced with '_'. Values are written verbatim; XML
-    /// special characters are escaped automatically by <see cref="XElement"/>.
+    /// unchanged, otherwise invalid characters are replaced with '_'. Because that encoding (and MSBuild's
+    /// case-insensitive property names) can map two distinct variables to the same property name, collisions
+    /// are detected and only the first variable is emitted; the rest are logged rather than silently
+    /// overwriting each other. Values are written verbatim; XML special characters are escaped automatically
+    /// by <see cref="XElement"/>.
     /// </remarks>
-    internal static void AddEnvironmentPropertyGroup(XElement projectElement, Dictionary<string, string> environmentVariables)
+    internal static void AddEnvironmentPropertyGroup(XElement projectElement, Dictionary<string, string> environmentVariables, ILogger logger)
     {
         var propertyGroup = new XElement("PropertyGroup");
+
+        // MSBuild property names are case-insensitive, and Encode maps invalid characters to '_', so two
+        // distinct variables can collide (e.g. "services:api:0" and "services_api_0", or "Foo" and "FOO").
+        // Track emitted names case-insensitively and skip later collisions so MSBuild does not silently take
+        // the last definition. The colliding variables still reach the app via the launch items, which use
+        // the original (unencoded) names.
+        var emittedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (key, value) in environmentVariables.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
         {
@@ -220,6 +265,16 @@ internal static class MauiEnvironmentHelper
             // property (or XML element) name, so skip it.
             if (string.IsNullOrEmpty(propertyName))
             {
+                continue;
+            }
+
+            if (!emittedNames.Add(propertyName))
+            {
+                logger.LogWarning(
+                    "Environment variable '{Key}' maps to MSBuild property '{PropertyName}', which is already defined by another variable. " +
+                    "Its value is not surfaced as an MSBuild property (it is still passed to the app). Rename the variable to avoid the collision.",
+                    key,
+                    propertyName);
                 continue;
             }
 
@@ -245,15 +300,21 @@ internal static class MauiEnvironmentHelper
     }
 
     /// <summary>
-    /// Creates an MSBuild targets file for iOS that sets environment variables.
+    /// Creates the MSBuild files that expose an iOS resource's environment variables both to the project
+    /// build (as properties) and to the iOS launch tooling (as <c>MlaunchEnvironmentVariables</c> items).
     /// </summary>
     /// <param name="fileSystemService">The file system service for managing temp files.</param>
     /// <param name="resource">The resource to collect environment variables from.</param>
     /// <param name="executionContext">The execution context.</param>
     /// <param name="logger">Logger for diagnostic output.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The path to the generated targets file, or null if no environment variables are present.</returns>
-    public static async Task<string?> CreateiOSEnvironmentTargetsFileAsync(
+    /// <returns>
+    /// The paths of the generated props and targets files, or nulls if no environment variables are present.
+    /// The props file is meant to be imported early (via <c>CustomBeforeMicrosoftCommonProps</c>) so its
+    /// properties are visible to the project body; the targets file is imported late (via
+    /// <c>CustomAfterMicrosoftCommonTargets</c>) so the mlaunch item hooks run after the common targets.
+    /// </returns>
+    public static async Task<(string? PropsFilePath, string? TargetsFilePath)> CreateiOSEnvironmentFilesAsync(
         IFileSystemService fileSystemService,
         IResource resource,
         DistributedApplicationExecutionContext executionContext,
@@ -265,29 +326,30 @@ internal static class MauiEnvironmentHelper
             .BuildAsync(executionContext, logger, cancellationToken)
             .ConfigureAwait(false);
 
-        // If no environment variables, return null
+        // If no environment variables, return nulls
         if (!executionConfiguration.EnvironmentVariables.Any())
         {
-            return null;
+            return (null, null);
         }
 
-        // Create a temporary targets file
+        var environmentVariables = executionConfiguration.EnvironmentVariables.ToDictionary();
+
+        // Create a temporary directory to hold the generated props and targets files
         var tempDirectory = fileSystemService.TempDirectory.CreateTempSubdirectory("aspire-maui-mlaunch-env").Path;
 
-        // Prune old targets files
-        PruneOldTargetsiOS(tempDirectory, logger);
+        // Prune old generated files
+        PruneOldGeneratedFiles(tempDirectory, logger);
 
         var sanitizedName = SanitizeFileName(resource.Name + "-ios");
         var uniqueId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+
+        var propsFilePath = Path.Combine(tempDirectory, $"{sanitizedName}-{uniqueId}.props");
+        await File.WriteAllTextAsync(propsFilePath, GenerateEnvironmentPropsFileContent(environmentVariables, logger), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+
         var targetsFilePath = Path.Combine(tempDirectory, $"{sanitizedName}-{uniqueId}.targets");
+        await File.WriteAllTextAsync(targetsFilePath, GenerateiOSTargetsFileContent(environmentVariables), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
 
-        // Generate the targets file content
-        var targetsContent = GenerateiOSTargetsFileContent(executionConfiguration.EnvironmentVariables.ToDictionary());
-
-        // Write the file
-        await File.WriteAllTextAsync(targetsFilePath, targetsContent, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
-
-        return targetsFilePath;
+        return (propsFilePath, targetsFilePath);
     }
 
     /// <summary>
@@ -303,10 +365,6 @@ internal static class MauiEnvironmentHelper
             new XAttribute("Project", "$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.After.Microsoft.Common.targets"),
             new XAttribute("Condition", "Exists('$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.After.Microsoft.Common.targets')")
         ));
-
-        // Also surface the environment variables as MSBuild properties so they can be consumed by the
-        // project build itself (e.g. in $(NAME) references or property conditions), not just mlaunch.
-        AddEnvironmentPropertyGroup(projectElement, environmentVariables);
 
         // Create an ItemGroup to add environment variables using MlaunchEnvironmentVariables
         // iOS apps need environment variables passed to mlaunch as KEY=VALUE pairs
@@ -341,33 +399,5 @@ internal static class MauiEnvironmentHelper
         using var stringWriter = new StringWriter();
         document.Save(stringWriter);
         return stringWriter.ToString();
-    }
-
-    private static void PruneOldTargetsiOS(string directory, ILogger logger)
-    {
-        var expiration = DateTimeOffset.UtcNow - TimeSpan.FromDays(1);
-        var deletedFiles = new List<string>();
-
-        foreach (var file in Directory.EnumerateFiles(directory, "*.targets", SearchOption.TopDirectoryOnly))
-        {
-            try
-            {
-                var info = new FileInfo(file);
-                if (info.Exists && info.LastWriteTimeUtc < expiration)
-                {
-                    info.Delete();
-                    deletedFiles.Add(info.Name);
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.LogDebug(ex, "Failed to prune stale iOS environment targets file '{TargetsFile}'.", file);
-            }
-        }
-
-        if (deletedFiles.Count > 0)
-        {
-            logger.LogDebug("Pruned {Count} stale iOS environment targets file(s): {Files}", deletedFiles.Count, string.Join(", ", deletedFiles));
-        }
     }
 }

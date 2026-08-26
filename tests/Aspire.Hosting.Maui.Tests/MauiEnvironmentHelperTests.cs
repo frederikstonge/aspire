@@ -3,6 +3,7 @@
 
 using System.Xml.Linq;
 using Aspire.Hosting.Maui.Utilities;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Aspire.Hosting.Tests;
 
@@ -184,37 +185,52 @@ public class MauiEnvironmentHelperTests
     }
 
     [Fact]
-    public void GenerateAndroidTargetsFileContent_ExposesEnvironmentVariablesAsProperties()
+    public void GenerateEnvironmentPropsFileContent_ExposesEnvironmentVariablesAsProperties()
     {
         var envVars = new Dictionary<string, string>
         {
             ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4317",
+            ["MY_VAR"] = "hello"
+        };
+
+        var content = MauiEnvironmentHelper.GenerateEnvironmentPropsFileContent(envVars, NullLogger.Instance);
+        var doc = XDocument.Parse(content);
+
+        Assert.Equal("Project", doc.Root!.Name.LocalName);
+
+        var propertyGroup = doc.Root.Elements("PropertyGroup").Single();
+        Assert.Equal("hello", propertyGroup.Element("MY_VAR")?.Value);
+        Assert.Equal("http://localhost:4317", propertyGroup.Element("OTEL_EXPORTER_OTLP_ENDPOINT")?.Value);
+    }
+
+    [Fact]
+    public void GenerateAndroidTargetsFileContent_DoesNotContainPropertyGroup()
+    {
+        var envVars = new Dictionary<string, string>
+        {
             ["MY_VAR"] = "hello"
         };
 
         var content = MauiEnvironmentHelper.GenerateAndroidTargetsFileContent(envVars);
         var doc = XDocument.Parse(content);
 
-        var propertyGroup = doc.Root!.Elements("PropertyGroup").Single();
-        Assert.Equal("hello", propertyGroup.Element("MY_VAR")?.Value);
-        Assert.Equal("http://localhost:4317", propertyGroup.Element("OTEL_EXPORTER_OTLP_ENDPOINT")?.Value);
+        // Properties are surfaced through the early .props file, not the late .targets file.
+        Assert.Empty(doc.Descendants("PropertyGroup"));
     }
 
     [Fact]
-    public void GenerateiOSTargetsFileContent_ExposesEnvironmentVariablesAsProperties()
+    public void GenerateiOSTargetsFileContent_DoesNotContainPropertyGroup()
     {
         var envVars = new Dictionary<string, string>
         {
-            ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4317",
             ["MY_VAR"] = "hello"
         };
 
         var content = MauiEnvironmentHelper.GenerateiOSTargetsFileContent(envVars);
         var doc = XDocument.Parse(content);
 
-        var propertyGroup = doc.Root!.Elements("PropertyGroup").Single();
-        Assert.Equal("hello", propertyGroup.Element("MY_VAR")?.Value);
-        Assert.Equal("http://localhost:4317", propertyGroup.Element("OTEL_EXPORTER_OTLP_ENDPOINT")?.Value);
+        // Properties are surfaced through the early .props file, not the late .targets file.
+        Assert.Empty(doc.Descendants("PropertyGroup"));
     }
 
     [Fact]
@@ -227,13 +243,37 @@ public class MauiEnvironmentHelperTests
         };
 
         var projectElement = new XElement("Project");
-        MauiEnvironmentHelper.AddEnvironmentPropertyGroup(projectElement, envVars);
+        MauiEnvironmentHelper.AddEnvironmentPropertyGroup(projectElement, envVars, NullLogger.Instance);
 
         var propertyGroup = projectElement.Elements("PropertyGroup").Single();
 
         // ':' is invalid in an MSBuild property name and a leading digit requires a '_' prefix.
         Assert.Equal("http://localhost:5000", propertyGroup.Element("services_api_0")?.Value);
         Assert.Equal("value", propertyGroup.Element("_1LEADING_DIGIT")?.Value);
+    }
+
+    [Fact]
+    public void AddEnvironmentPropertyGroup_CollidingNames_EmitsFirstAndDoesNotDuplicate()
+    {
+        // "services:api:0" and "services_api_0" both encode to "services_api_0", and MSBuild property
+        // names are case-insensitive, so these three variables collapse to a single property. The first
+        // in ordinal-ignore-case order wins ('':'' sorts before ''_''); the rest are dropped (and logged)
+        // rather than overwriting.
+        var envVars = new Dictionary<string, string>
+        {
+            ["services:api:0"] = "colon",
+            ["services_api_0"] = "underscore",
+            ["SERVICES_API_0"] = "upper"
+        };
+
+        var projectElement = new XElement("Project");
+        MauiEnvironmentHelper.AddEnvironmentPropertyGroup(projectElement, envVars, NullLogger.Instance);
+
+        var properties = projectElement.Elements("PropertyGroup").Single().Elements().ToList();
+
+        var property = Assert.Single(properties);
+        Assert.Equal("services_api_0", property.Name.LocalName);
+        Assert.Equal("colon", property.Value);
     }
 
     [Theory]
