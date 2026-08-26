@@ -92,6 +92,10 @@ internal static class MauiEnvironmentHelper
             new XAttribute("Condition", "Exists('$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.After.Microsoft.Common.targets')")
         ));
 
+        // Also surface the environment variables as MSBuild properties so they can be consumed by the
+        // project build itself (e.g. in $(NAME) references or property conditions), not just the launch tooling.
+        AddEnvironmentPropertyGroup(projectElement, environmentVariables);
+
         // Create an ItemGroup for AndroidEnvironment files to be generated
         var itemGroup = new XElement("ItemGroup");
         foreach (var (key, value) in environmentVariables.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
@@ -193,6 +197,38 @@ internal static class MauiEnvironmentHelper
         return new string(chars);
     }
 
+    /// <summary>
+    /// Adds a <c>PropertyGroup</c> that exposes each environment variable as an MSBuild property so the
+    /// values injected by Aspire are visible to the project build itself (for example in <c>$(NAME)</c>
+    /// references or property conditions), not just to the platform launch tooling.
+    /// </summary>
+    /// <remarks>
+    /// Environment variable names are encoded to valid MSBuild property identifiers via
+    /// <see cref="EnvironmentVariableNameEncoder.Encode(string)"/>: names that are already valid are used
+    /// unchanged, otherwise invalid characters are replaced with '_'. Values are written verbatim; XML
+    /// special characters are escaped automatically by <see cref="XElement"/>.
+    /// </remarks>
+    internal static void AddEnvironmentPropertyGroup(XElement projectElement, Dictionary<string, string> environmentVariables)
+    {
+        var propertyGroup = new XElement("PropertyGroup");
+
+        foreach (var (key, value) in environmentVariables.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            var propertyName = EnvironmentVariableNameEncoder.Encode(key);
+
+            // An empty encoded name only occurs for an empty key, which cannot form a valid MSBuild
+            // property (or XML element) name, so skip it.
+            if (string.IsNullOrEmpty(propertyName))
+            {
+                continue;
+            }
+
+            propertyGroup.Add(new XElement(propertyName, value));
+        }
+
+        projectElement.Add(propertyGroup);
+    }
+
     internal static string EncodeMSBuildItemValue(string value, out bool wasEncoded)
     {
         wasEncoded = value.Contains('%', StringComparison.Ordinal) || value.Contains(';', StringComparison.Ordinal);
@@ -267,6 +303,10 @@ internal static class MauiEnvironmentHelper
             new XAttribute("Project", "$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.After.Microsoft.Common.targets"),
             new XAttribute("Condition", "Exists('$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.After.Microsoft.Common.targets')")
         ));
+
+        // Also surface the environment variables as MSBuild properties so they can be consumed by the
+        // project build itself (e.g. in $(NAME) references or property conditions), not just mlaunch.
+        AddEnvironmentPropertyGroup(projectElement, environmentVariables);
 
         // Create an ItemGroup to add environment variables using MlaunchEnvironmentVariables
         // iOS apps need environment variables passed to mlaunch as KEY=VALUE pairs

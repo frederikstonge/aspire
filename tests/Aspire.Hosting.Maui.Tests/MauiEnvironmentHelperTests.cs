@@ -183,6 +183,59 @@ public class MauiEnvironmentHelperTests
             items);
     }
 
+    [Fact]
+    public void GenerateAndroidTargetsFileContent_ExposesEnvironmentVariablesAsProperties()
+    {
+        var envVars = new Dictionary<string, string>
+        {
+            ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4317",
+            ["MY_VAR"] = "hello"
+        };
+
+        var content = MauiEnvironmentHelper.GenerateAndroidTargetsFileContent(envVars);
+        var doc = XDocument.Parse(content);
+
+        var propertyGroup = doc.Root!.Elements("PropertyGroup").Single();
+        Assert.Equal("hello", propertyGroup.Element("MY_VAR")?.Value);
+        Assert.Equal("http://localhost:4317", propertyGroup.Element("OTEL_EXPORTER_OTLP_ENDPOINT")?.Value);
+    }
+
+    [Fact]
+    public void GenerateiOSTargetsFileContent_ExposesEnvironmentVariablesAsProperties()
+    {
+        var envVars = new Dictionary<string, string>
+        {
+            ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4317",
+            ["MY_VAR"] = "hello"
+        };
+
+        var content = MauiEnvironmentHelper.GenerateiOSTargetsFileContent(envVars);
+        var doc = XDocument.Parse(content);
+
+        var propertyGroup = doc.Root!.Elements("PropertyGroup").Single();
+        Assert.Equal("hello", propertyGroup.Element("MY_VAR")?.Value);
+        Assert.Equal("http://localhost:4317", propertyGroup.Element("OTEL_EXPORTER_OTLP_ENDPOINT")?.Value);
+    }
+
+    [Fact]
+    public void AddEnvironmentPropertyGroup_EncodesInvalidPropertyNames()
+    {
+        var envVars = new Dictionary<string, string>
+        {
+            ["services:api:0"] = "http://localhost:5000",
+            ["1LEADING_DIGIT"] = "value"
+        };
+
+        var projectElement = new XElement("Project");
+        MauiEnvironmentHelper.AddEnvironmentPropertyGroup(projectElement, envVars);
+
+        var propertyGroup = projectElement.Elements("PropertyGroup").Single();
+
+        // ':' is invalid in an MSBuild property name and a leading digit requires a '_' prefix.
+        Assert.Equal("http://localhost:5000", propertyGroup.Element("services_api_0")?.Value);
+        Assert.Equal("value", propertyGroup.Element("_1LEADING_DIGIT")?.Value);
+    }
+
     [Theory]
     [InlineData("simple-value", "simple-value", false)]
     [InlineData("has;semicolons", "has%3Bsemicolons", true)]
