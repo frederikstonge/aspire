@@ -8,6 +8,7 @@ using System.Text;
 using System.Xml;
 using System.Xml.Linq;
 using Aspire.Hosting.ApplicationModel;
+using Aspire.Hosting.Maui.Annotations;
 using Microsoft.Extensions.Logging;
 
 namespace Aspire.Hosting.Maui.Utilities;
@@ -22,6 +23,38 @@ namespace Aspire.Hosting.Maui.Utilities;
 /// </remarks>
 internal static class MauiEnvironmentHelper
 {
+    /// <summary>
+    /// Creates a lazy generator annotation for an Android resource's environment files, capturing the
+    /// services needed to generate them at launch time.
+    /// </summary>
+    /// <remarks>
+    /// Attached at resource creation so both the serialized pre-build and the DCP launch command can share
+    /// the same generated files regardless of eventing order. See <see cref="MauiEnvironmentFilesAnnotation"/>.
+    /// </remarks>
+    public static MauiEnvironmentFilesAnnotation CreateAndroidEnvironmentFilesAnnotation(IDistributedApplicationBuilder appBuilder, IResource resource)
+    {
+        var fileSystemService = appBuilder.FileSystemService;
+        var executionContext = appBuilder.ExecutionContext;
+        return new MauiEnvironmentFilesAnnotation((logger, ct) =>
+            CreateAndroidEnvironmentFilesAsync(fileSystemService, resource, executionContext, logger, ct));
+    }
+
+    /// <summary>
+    /// Creates a lazy generator annotation for an iOS resource's environment files, capturing the
+    /// services needed to generate them at launch time.
+    /// </summary>
+    /// <remarks>
+    /// Attached at resource creation so both the serialized pre-build and the DCP launch command can share
+    /// the same generated files regardless of eventing order. See <see cref="MauiEnvironmentFilesAnnotation"/>.
+    /// </remarks>
+    public static MauiEnvironmentFilesAnnotation CreateiOSEnvironmentFilesAnnotation(IDistributedApplicationBuilder appBuilder, IResource resource)
+    {
+        var fileSystemService = appBuilder.FileSystemService;
+        var executionContext = appBuilder.ExecutionContext;
+        return new MauiEnvironmentFilesAnnotation((logger, ct) =>
+            CreateiOSEnvironmentFilesAsync(fileSystemService, resource, executionContext, logger, ct));
+    }
+
     /// <summary>
     /// Creates the MSBuild files that expose an Android resource's environment variables both to the
     /// project build (as properties) and to the Android launch tooling (as <c>AndroidEnvironment</c> items).

@@ -130,20 +130,13 @@ internal class MauiBuildQueueEventSubscriber(
     }
 
     /// <summary>
-    /// Runs <c>dotnet build</c> as a subprocess and pipes its output to the resource logger.
+    /// Builds the <c>dotnet build</c> argument list, appending the environment MSBuild files when present so
+    /// that <c>WithEnvironment</c> values influence the actual compilation (build-time conditions/properties
+    /// and, for Android, the <c>AndroidEnvironment</c> items baked into the app). The same cached files are
+    /// reused by the no-build Run launch command via the environment subscriber's command-line callback.
     /// </summary>
-    internal virtual async Task RunBuildAsync(IResource resource, ILogger logger, CancellationToken cancellationToken)
+    internal static async Task<List<string>> BuildDotnetBuildArgumentsAsync(IResource resource, MauiBuildInfoAnnotation buildInfo, ILogger logger, CancellationToken cancellationToken)
     {
-        if (!resource.TryGetLastAnnotation<MauiBuildInfoAnnotation>(out var buildInfo))
-        {
-            logger.LogWarning("No build info annotation found for resource '{ResourceName}'. Startup cannot proceed.", resource.Name);
-            throw new InvalidOperationException(
-                $"Resource '{resource.Name}' is missing MauiBuildInfoAnnotation. " +
-                "Cannot proceed with build — the semaphore would be held indefinitely.");
-        }
-
-        // Match DCP's launch configuration so the no-build Run target starts the exact outputs
-        // produced by this serialized build.
         var args = new List<string> { "build", buildInfo.ProjectPath };
 
         if (!string.IsNullOrEmpty(buildInfo.TargetFramework))
@@ -159,6 +152,44 @@ internal class MauiBuildQueueEventSubscriber(
         }
 
         args.AddRange(buildInfo.AdditionalBuildArguments);
+
+        if (resource.TryGetLastAnnotation<MauiEnvironmentFilesAnnotation>(out var envFiles))
+        {
+            var (propsFilePath, targetsFilePath) = await envFiles.GetOrCreateAsync(logger, cancellationToken).ConfigureAwait(false);
+
+            // Imported early (before the project body) so environment values are visible to project-level
+            // property definitions and conditions.
+            if (propsFilePath is not null)
+            {
+                args.Add($"-p:CustomBeforeMicrosoftCommonProps={propsFilePath}");
+            }
+
+            // Imported late so platform launch item hooks run after the common targets have defined them.
+            if (targetsFilePath is not null)
+            {
+                args.Add($"-p:CustomAfterMicrosoftCommonTargets={targetsFilePath}");
+            }
+        }
+
+        return args;
+    }
+
+    /// <summary>
+    /// Runs <c>dotnet build</c> as a subprocess and pipes its output to the resource logger.
+    /// </summary>
+    internal virtual async Task RunBuildAsync(IResource resource, ILogger logger, CancellationToken cancellationToken)
+    {
+        if (!resource.TryGetLastAnnotation<MauiBuildInfoAnnotation>(out var buildInfo))
+        {
+            logger.LogWarning("No build info annotation found for resource '{ResourceName}'. Startup cannot proceed.", resource.Name);
+            throw new InvalidOperationException(
+                $"Resource '{resource.Name}' is missing MauiBuildInfoAnnotation. " +
+                "Cannot proceed with build — the semaphore would be held indefinitely.");
+        }
+
+        // Match DCP's launch configuration so the no-build Run target starts the exact outputs
+        // produced by this serialized build.
+        var args = await BuildDotnetBuildArgumentsAsync(resource, buildInfo, logger, cancellationToken).ConfigureAwait(false);
 
         var psi = new ProcessStartInfo("dotnet")
         {

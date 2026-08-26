@@ -160,6 +160,8 @@ public static class MauiAndroidExtensions
         var resourceBuilder = builder.ApplicationBuilder.AddResource(androidDeviceResource)
             .WithAnnotation(new MauiProjectMetadata(projectPath))
             .WithAnnotation(new MauiAndroidEnvironmentAnnotation()) // Enable environment variable support via targets file
+            // Attached at creation so both the serialized pre-build and the launch command import the same files.
+            .WithAnnotation(MauiEnvironmentHelper.CreateAndroidEnvironmentFilesAnnotation(builder.ApplicationBuilder, androidDeviceResource))
             .WithAnnotation(new ExecutableAnnotation
             {
                 Command = "dotnet",
@@ -365,6 +367,8 @@ public static class MauiAndroidExtensions
         var resourceBuilder = builder.ApplicationBuilder.AddResource(androidEmulatorResource)
             .WithAnnotation(new MauiProjectMetadata(projectPath))
             .WithAnnotation(new MauiAndroidEnvironmentAnnotation()) // Enable environment variable support via targets file
+            // Attached at creation so both the serialized pre-build and the launch command import the same files.
+            .WithAnnotation(MauiEnvironmentHelper.CreateAndroidEnvironmentFilesAnnotation(builder.ApplicationBuilder, androidEmulatorResource))
             .WithAnnotation(new ExecutableAnnotation
             {
                 Command = "dotnet",

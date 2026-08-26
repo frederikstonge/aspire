@@ -1,12 +1,10 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-#pragma warning disable ASPIREFILESYSTEM001 // Type is for evaluation purposes only
-
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Eventing;
 using Aspire.Hosting.Lifecycle;
-using Microsoft.Extensions.DependencyInjection;
+using Aspire.Hosting.Maui.Annotations;
 using Microsoft.Extensions.Logging;
 
 namespace Aspire.Hosting.Maui.Utilities;
@@ -39,10 +37,8 @@ internal sealed class MauiiOSEnvironmentProcessedAnnotation : IResourceAnnotatio
 /// Event subscriber that processes <see cref="MauiiOSEnvironmentAnnotation"/> annotations.
 /// </summary>
 internal sealed class MauiiOSEnvironmentSubscriber(
-    DistributedApplicationExecutionContext executionContext,
     ResourceLoggerService loggerService,
-    ResourceNotificationService notificationService,
-    IFileSystemService fileSystemService) : IDistributedApplicationEventingSubscriber
+    ResourceNotificationService notificationService) : IDistributedApplicationEventingSubscriber
 {
     public Task SubscribeAsync(IDistributedApplicationEventing eventing, DistributedApplicationExecutionContext execContext, CancellationToken cancellationToken)
     {
@@ -76,45 +72,31 @@ internal sealed class MauiiOSEnvironmentSubscriber(
 
         try
         {
-            // Add a CommandLineArgsCallback that will generate the MSBuild files
-            // This runs AFTER all environment callbacks have been processed
-            // The callback itself ensures idempotency by only generating the files once
-            (string? PropsFilePath, string? TargetsFilePath)? generatedFiles = null;
-
+            // Add a CommandLineArgsCallback that appends the generated MSBuild files to the DCP launch
+            // command. The files themselves are produced by the MauiEnvironmentFilesAnnotation attached at
+            // resource creation, which caches them so the serialized pre-build and this launch share the
+            // exact same paths regardless of subscriber ordering.
             resource.Annotations.Add(new CommandLineArgsCallbackAnnotation(async context =>
             {
-                // Only generate the files once, even if this callback is invoked multiple times
-                if (generatedFiles is null)
+                if (!resource.TryGetLastAnnotation<MauiEnvironmentFilesAnnotation>(out var envFiles))
                 {
-                    generatedFiles = await MauiEnvironmentHelper.CreateiOSEnvironmentFilesAsync(
-                        fileSystemService,
-                        resource,
-                        executionContext,
-                        logger,
-                        cancellationToken
-                    ).ConfigureAwait(false);
-
-                    if (generatedFiles.Value.PropsFilePath is not null || generatedFiles.Value.TargetsFilePath is not null)
-                    {
-                        logger.LogInformation(
-                            "Generated environment files for iOS (props: {Props}, targets: {Targets})",
-                            generatedFiles.Value.PropsFilePath,
-                            generatedFiles.Value.TargetsFilePath);
-                    }
+                    return;
                 }
+
+                var (propsFilePath, targetsFilePath) = await envFiles.GetOrCreateAsync(context.Logger, context.CancellationToken).ConfigureAwait(false);
 
                 // The props file is imported early (before the project body) so the environment values are
                 // visible to project-level property definitions and conditions.
-                if (generatedFiles.Value.PropsFilePath is not null)
+                if (propsFilePath is not null)
                 {
-                    context.Args.Add($"-p:CustomBeforeMicrosoftCommonProps={generatedFiles.Value.PropsFilePath}");
+                    context.Args.Add($"-p:CustomBeforeMicrosoftCommonProps={propsFilePath}");
                 }
 
                 // The targets file is imported late so the mlaunch launch item hooks run after the common
                 // targets have defined them.
-                if (generatedFiles.Value.TargetsFilePath is not null)
+                if (targetsFilePath is not null)
                 {
-                    context.Args.Add($"-p:CustomAfterMicrosoftCommonTargets={generatedFiles.Value.TargetsFilePath}");
+                    context.Args.Add($"-p:CustomAfterMicrosoftCommonTargets={targetsFilePath}");
                 }
             }));
 

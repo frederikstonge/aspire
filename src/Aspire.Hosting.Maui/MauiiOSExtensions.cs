@@ -167,6 +167,8 @@ public static class MauiiOSExtensions
         var resourceBuilder = builder.ApplicationBuilder.AddResource(iOSDeviceResource)
             .WithAnnotation(new MauiProjectMetadata(projectPath))
             .WithAnnotation(new MauiiOSEnvironmentAnnotation()) // Enable environment variable support via targets file
+            // Attached at creation so both the serialized pre-build and the launch command import the same files.
+            .WithAnnotation(MauiEnvironmentHelper.CreateiOSEnvironmentFilesAnnotation(builder.ApplicationBuilder, iOSDeviceResource))
             .WithAnnotation(new ExecutableAnnotation
             {
                 Command = "dotnet",
@@ -378,6 +380,8 @@ public static class MauiiOSExtensions
         var resourceBuilder = builder.ApplicationBuilder.AddResource(iOSSimulatorResource)
             .WithAnnotation(new MauiProjectMetadata(projectPath))
             .WithAnnotation(new MauiiOSEnvironmentAnnotation()) // Enable environment variable support via targets file
+            // Attached at creation so both the serialized pre-build and the launch command import the same files.
+            .WithAnnotation(MauiEnvironmentHelper.CreateiOSEnvironmentFilesAnnotation(builder.ApplicationBuilder, iOSSimulatorResource))
             .WithAnnotation(new ExecutableAnnotation
             {
                 Command = "dotnet",

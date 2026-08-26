@@ -257,7 +257,7 @@ public class MauiEnvironmentHelperTests
     {
         // "services:api:0" and "services_api_0" both encode to "services_api_0", and MSBuild property
         // names are case-insensitive, so these three variables collapse to a single property. The first
-        // in ordinal-ignore-case order wins ('':'' sorts before ''_''); the rest are dropped (and logged)
+        // in ordinal-ignore-case order wins (':' sorts before '_'); the rest are dropped (and logged)
         // rather than overwriting.
         var envVars = new Dictionary<string, string>
         {

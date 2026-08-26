@@ -1,14 +1,15 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-#pragma warning disable ASPIREFILESYSTEM001 // Type is for evaluation purposes only
-
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Eventing;
 using Aspire.Hosting.Lifecycle;
+using Aspire.Hosting.Maui.Annotations;
+using Aspire.Hosting.Maui.Lifecycle;
 using Aspire.Hosting.Maui.Utilities;
 using Aspire.Hosting.Tests.Utils;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Aspire.Hosting.Tests;
 
@@ -35,10 +36,8 @@ public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
         await using var app = appBuilder.Build();
 
         var subscriber = new MauiAndroidEnvironmentSubscriber(
-            app.Services.GetRequiredService<DistributedApplicationExecutionContext>(),
             app.Services.GetRequiredService<ResourceLoggerService>(),
-            app.Services.GetRequiredService<ResourceNotificationService>(),
-            app.Services.GetRequiredService<IFileSystemService>());
+            app.Services.GetRequiredService<ResourceNotificationService>());
 
         await PublishBeforeResourceStartedAsync(app, subscriber, android.Resource);
 
@@ -65,10 +64,8 @@ public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
         await using var app = appBuilder.Build();
 
         var subscriber = new MauiiOSEnvironmentSubscriber(
-            app.Services.GetRequiredService<DistributedApplicationExecutionContext>(),
             app.Services.GetRequiredService<ResourceLoggerService>(),
-            app.Services.GetRequiredService<ResourceNotificationService>(),
-            app.Services.GetRequiredService<IFileSystemService>());
+            app.Services.GetRequiredService<ResourceNotificationService>());
 
         await PublishBeforeResourceStartedAsync(app, subscriber, ios.Resource);
 
@@ -76,6 +73,54 @@ public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
 
         Assert.Contains(args, a => a.StartsWith("-p:CustomBeforeMicrosoftCommonProps=", StringComparison.Ordinal));
         Assert.Contains(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AndroidBuild_ImportsGeneratedPropsAndTargets()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempFile = Path.Combine(workspace.Path, "TempMauiProject.csproj");
+        File.WriteAllText(tempFile, MauiTestHelper.CreateProjectContent("net10.0-android"));
+
+        var appBuilder = DistributedApplication.CreateBuilder();
+        var maui = appBuilder.AddMauiProject("mauiapp", tempFile);
+        var android = maui.AddAndroidEmulator()
+            .WithEnvironment("MY_VAR", "hello");
+
+        await using var app = appBuilder.Build();
+
+        var args = await GetBuildArgumentsAsync(android.Resource);
+
+        // The actual `dotnet build` (not just the launch command) must import the generated files, otherwise
+        // build-time conditions and Android environment items never see WithEnvironment values.
+        Assert.Contains(args, a => a.StartsWith("-p:CustomBeforeMicrosoftCommonProps=", StringComparison.Ordinal));
+        Assert.Contains(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task iOSBuild_ImportsGeneratedPropsAndTargets()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempFile = Path.Combine(workspace.Path, "TempMauiProject.csproj");
+        File.WriteAllText(tempFile, MauiTestHelper.CreateProjectContent("net10.0-ios"));
+
+        var appBuilder = DistributedApplication.CreateBuilder();
+        var maui = appBuilder.AddMauiProject("mauiapp", tempFile);
+        var ios = maui.AddiOSSimulator()
+            .WithEnvironment("MY_VAR", "hello");
+
+        await using var app = appBuilder.Build();
+
+        var args = await GetBuildArgumentsAsync(ios.Resource);
+
+        Assert.Contains(args, a => a.StartsWith("-p:CustomBeforeMicrosoftCommonProps=", StringComparison.Ordinal));
+        Assert.Contains(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
+    }
+
+    private static async Task<List<string>> GetBuildArgumentsAsync(IResource resource)
+    {
+        var buildInfo = resource.Annotations.OfType<MauiBuildInfoAnnotation>().Last();
+        return await MauiBuildQueueEventSubscriber.BuildDotnetBuildArgumentsAsync(resource, buildInfo, NullLogger.Instance, CancellationToken.None);
     }
 
     private static async Task PublishBeforeResourceStartedAsync(
