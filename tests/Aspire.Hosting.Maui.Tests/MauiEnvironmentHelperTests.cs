@@ -198,7 +198,9 @@ public class MauiEnvironmentHelperTests
 
         Assert.Equal("Project", doc.Root!.Name.LocalName);
 
-        var propertyGroup = doc.Root.Elements("PropertyGroup").Single();
+        // The file also contains a PropertyGroup that recovers the user's original
+        // CustomBeforeMicrosoftCommonProps; select the one that carries the environment variables.
+        var propertyGroup = doc.Root.Elements("PropertyGroup").Single(pg => pg.Element("MY_VAR") is not null);
         Assert.Equal("hello", propertyGroup.Element("MY_VAR")?.Value);
         Assert.Equal("http://localhost:4317", propertyGroup.Element("OTEL_EXPORTER_OTLP_ENDPOINT")?.Value);
     }

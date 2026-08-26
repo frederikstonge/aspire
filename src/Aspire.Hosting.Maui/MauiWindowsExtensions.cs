@@ -91,7 +91,7 @@ public static class MauiWindowsExtensions
 
         var resourceBuilder = builder.ApplicationBuilder.AddResource(windowsResource)
             .WithAnnotation(new MauiProjectMetadata(projectPath))
-            // Attached at creation so both the serialized pre-build and the launch command import the same file.
+            // Attached at creation; consumed only by the serialized pre-build (Windows has no launch-command callback).
             .WithAnnotation(MauiEnvironmentHelper.CreatePropsEnvironmentFilesAnnotation(builder.ApplicationBuilder, windowsResource, "windows"))
             .WithAnnotation(new ExecutableAnnotation
             {

@@ -91,7 +91,7 @@ public static class MauiMacCatalystExtensions
 
         var resourceBuilder = builder.ApplicationBuilder.AddResource(macCatalystResource)
             .WithAnnotation(new MauiProjectMetadata(projectPath))
-            // Attached at creation so both the serialized pre-build and the launch command import the same file.
+            // Attached at creation; consumed only by the serialized pre-build (Mac Catalyst has no launch-command callback).
             .WithAnnotation(MauiEnvironmentHelper.CreatePropsEnvironmentFilesAnnotation(builder.ApplicationBuilder, macCatalystResource, "maccatalyst"))
             .WithAnnotation(new ExecutableAnnotation
             {

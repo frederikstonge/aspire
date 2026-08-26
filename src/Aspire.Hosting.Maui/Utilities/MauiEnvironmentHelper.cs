@@ -63,8 +63,8 @@ internal static class MauiEnvironmentHelper
     /// extra platform launch item hooks.
     /// </summary>
     /// <remarks>
-    /// Attached at resource creation so both the serialized pre-build and the DCP launch command can share
-    /// the same generated file regardless of eventing order. See <see cref="MauiEnvironmentFilesAnnotation"/>.
+    /// Attached at resource creation. Unlike Android and iOS, these platforms have no launch-command callback,
+    /// so only the serialized pre-build consumes the generated props file. See <see cref="MauiEnvironmentFilesAnnotation"/>.
     /// </remarks>
     public static MauiEnvironmentFilesAnnotation CreatePropsEnvironmentFilesAnnotation(IDistributedApplicationBuilder appBuilder, IResource resource, string platformMoniker)
     {
@@ -254,36 +254,46 @@ internal static class MauiEnvironmentHelper
 
     private static void PruneOldGeneratedFiles(string directory, ILogger logger)
     {
-        var expiration = DateTimeOffset.UtcNow - TimeSpan.FromDays(1);
-        var deletedFiles = new List<string>();
-
-        // Both the early ".props" and the late ".targets" files are generated per run, so prune both.
-        foreach (var file in Directory.EnumerateFiles(directory, "*.*", SearchOption.TopDirectoryOnly))
+        // Each run creates a brand-new unique subdirectory via CreateTempSubdirectory, so `directory` itself
+        // is empty and never holds stale artifacts. Leftovers from prior (including crashed) runs live in
+        // *sibling* directories under the shared temp root, so prune those instead by scanning the parent.
+        var parent = Directory.GetParent(directory)?.FullName;
+        if (parent is null)
         {
-            if (!file.EndsWith(".props", StringComparison.OrdinalIgnoreCase) &&
-                !file.EndsWith(".targets", StringComparison.OrdinalIgnoreCase))
+            return;
+        }
+
+        var expiration = DateTimeOffset.UtcNow - TimeSpan.FromDays(1);
+        var deletedDirectories = new List<string>();
+
+        // All of this helper's temp subdirectories are created with an "aspire-maui-" prefix
+        // (e.g. aspire-maui-android-env, aspire-maui-mlaunch-env, aspire-maui-windows-env), so match that.
+        foreach (var siblingDirectory in Directory.EnumerateDirectories(parent, "aspire-maui-*", SearchOption.TopDirectoryOnly))
+        {
+            // Never delete the directory that was just created for the current run.
+            if (string.Equals(Path.GetFullPath(siblingDirectory), Path.GetFullPath(directory), StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
             try
             {
-                var info = new FileInfo(file);
+                var info = new DirectoryInfo(siblingDirectory);
                 if (info.Exists && info.LastWriteTimeUtc < expiration)
                 {
-                    info.Delete();
-                    deletedFiles.Add(info.Name);
+                    info.Delete(recursive: true);
+                    deletedDirectories.Add(info.Name);
                 }
             }
             catch (Exception ex)
             {
-                logger.LogDebug(ex, "Failed to prune stale MAUI environment file '{File}'.", file);
+                logger.LogDebug(ex, "Failed to prune stale MAUI environment directory '{Directory}'.", siblingDirectory);
             }
         }
 
-        if (deletedFiles.Count > 0)
+        if (deletedDirectories.Count > 0)
         {
-            logger.LogDebug("Pruned {Count} stale MAUI environment file(s): {Files}", deletedFiles.Count, string.Join(", ", deletedFiles));
+            logger.LogDebug("Pruned {Count} stale MAUI environment directory(ies): {Directories}", deletedDirectories.Count, string.Join(", ", deletedDirectories));
         }
     }
 
@@ -317,12 +327,29 @@ internal static class MauiEnvironmentHelper
     {
         var projectElement = new XElement("Project");
 
-        // Re-import the default Custom.Before.Microsoft.Common.props so overriding
-        // CustomBeforeMicrosoftCommonProps via -p: does not suppress a user-provided extension file.
+        // We claim the single CustomBeforeMicrosoftCommonProps extension slot by passing -p: on the command
+        // line, which is a global property and therefore overrides (and hides) any value the user supplied
+        // via the environment or a response file. To avoid silently dropping a user-provided extension file,
+        // recover and chain the original value here.
+        //
+        // The value is read with GetEnvironmentVariable rather than $(CustomBeforeMicrosoftCommonProps)
+        // because the latter already resolves to *this* generated file (that is how we got imported); the raw
+        // environment variable is not shadowed by the global -p: property, so it still exposes the user's
+        // original path. If the user set nothing, fall back to MSBuild's conventional default extension file,
+        // which is exactly what MSBuild would have imported into this slot on its own.
+        const string originalPropName = "_AspireOriginalCustomBeforeMicrosoftCommonProps";
+        const string conventionalDefault = "$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.Before.Microsoft.Common.props";
+
+        projectElement.Add(new XElement(
+            "PropertyGroup",
+            new XElement(originalPropName, "$([System.Environment]::GetEnvironmentVariable('CustomBeforeMicrosoftCommonProps'))"),
+            new XElement(originalPropName, new XAttribute("Condition", $"'$({originalPropName})' == ''"), conventionalDefault)
+        ));
+
         projectElement.Add(new XElement(
             "Import",
-            new XAttribute("Project", "$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.Before.Microsoft.Common.props"),
-            new XAttribute("Condition", "Exists('$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.Before.Microsoft.Common.props')")
+            new XAttribute("Project", $"$({originalPropName})"),
+            new XAttribute("Condition", $"'$({originalPropName})' != '' and Exists('$({originalPropName})')")
         ));
 
         AddEnvironmentPropertyGroup(projectElement, environmentVariables, logger);
