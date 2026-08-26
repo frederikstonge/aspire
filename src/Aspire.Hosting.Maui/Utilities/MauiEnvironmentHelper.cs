@@ -330,6 +330,41 @@ internal static class MauiEnvironmentHelper
         return SerializeProject(projectElement);
     }
 
+    // MSBuild's reserved (read-only) property names. Defining any of these in a project file throws MSB4004
+    // ("The name '...' is reserved, and cannot be modified."), which would break the build for an otherwise
+    // valid WithEnvironment call. Membership is exact (case-insensitive), not prefix based: MSBuild only
+    // reserves this specific set, so custom "MSBuild"-prefixed names remain settable.
+    // Mirrors Microsoft.Build.Internal.ReservedPropertyNames.ReservedProperties:
+    // https://github.com/dotnet/msbuild/blob/main/src/Build/Resources/Constants.cs
+    private static readonly HashSet<string> s_reservedMSBuildPropertyNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "MSBuildProjectDirectory",
+        "MSBuildProjectDirectoryNoRoot",
+        "MSBuildProjectFile",
+        "MSBuildProjectExtension",
+        "MSBuildProjectFullPath",
+        "MSBuildProjectName",
+        "MSBuildThisFileDirectory",
+        "MSBuildThisFileDirectoryNoRoot",
+        "MSBuildThisFile",
+        "MSBuildThisFileExtension",
+        "MSBuildThisFileFullPath",
+        "MSBuildThisFileName",
+        "MSBuildBinPath",
+        "MSBuildProjectDefaultTargets",
+        "MSBuildToolsPath",
+        "MSBuildToolsVersion",
+        "MSBuildRuntimeType",
+        "MSBuildStartupDirectory",
+        "MSBuildNodeCount",
+        "MSBuildLastTaskResult",
+        "MSBuildProgramFiles32",
+        "MSBuildAssemblyVersion",
+        "MSBuildVersion",
+        "MSBuildInteractive",
+        "MSBuildDisableFeaturesFromVersion",
+    };
+
     /// <summary>
     /// Adds a <c>PropertyGroup</c> that exposes each environment variable as an MSBuild property so the
     /// values injected by Aspire are visible to the project build itself (for example in <c>$(NAME)</c>
@@ -341,9 +376,10 @@ internal static class MauiEnvironmentHelper
     /// unchanged, otherwise invalid characters are replaced with '_'. Because that encoding (and MSBuild's
     /// case-insensitive property names) can map two distinct variables to the same property name, collisions
     /// are detected and only the first variable is emitted; the rest are logged rather than silently
-    /// overwriting each other. Values are escaped via <see cref="EscapeMSBuildPropertyValue"/> so MSBuild
-    /// syntax in a value (such as <c>$(Configuration)</c>) is preserved literally instead of expanding; XML
-    /// special characters are escaped automatically by <see cref="XElement"/>.
+    /// overwriting each other. Names that map to a reserved MSBuild property are skipped (and logged) so they
+    /// do not fail the build with MSB4004. Values are escaped via <see cref="EscapeMSBuildPropertyValue"/> so
+    /// MSBuild syntax in a value (such as <c>$(Configuration)</c>) is preserved literally instead of
+    /// expanding; XML special characters are escaped automatically by <see cref="XElement"/>.
     /// </remarks>
     internal static void AddEnvironmentPropertyGroup(XElement projectElement, Dictionary<string, string> environmentVariables, ILogger logger)
     {
@@ -364,6 +400,19 @@ internal static class MauiEnvironmentHelper
             // property (or XML element) name, so skip it.
             if (string.IsNullOrEmpty(propertyName))
             {
+                continue;
+            }
+
+            // Reserved names (e.g. MSBuildProjectDirectory, MSBuildVersion) cannot be redefined in a project
+            // file; emitting them would fail the whole build with MSB4004. Skip them so an otherwise valid
+            // WithEnvironment call still works — the value is still passed to the app via the launch items.
+            if (s_reservedMSBuildPropertyNames.Contains(propertyName))
+            {
+                logger.LogWarning(
+                    "Environment variable '{Key}' maps to reserved MSBuild property '{PropertyName}', which cannot be redefined in a project file. " +
+                    "Its value is not surfaced as an MSBuild property (it is still passed to the app).",
+                    key,
+                    propertyName);
                 continue;
             }
 

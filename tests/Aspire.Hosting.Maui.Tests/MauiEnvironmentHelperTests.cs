@@ -277,6 +277,30 @@ public class MauiEnvironmentHelperTests
     }
 
     [Fact]
+    public void AddEnvironmentPropertyGroup_SkipsReservedMSBuildPropertyNames()
+    {
+        // Reserved MSBuild property names cannot be redefined in a project file (MSB4004), so they must not
+        // be emitted as properties. Non-reserved variables in the same call are still surfaced.
+        var envVars = new Dictionary<string, string>
+        {
+            ["MSBuildProjectDirectory"] = "/should/not/be/emitted",
+            ["MSBuildVersion"] = "99.99",
+            // Reserved-name matching is case-insensitive, matching MSBuild's own comparison.
+            ["msbuildtoolsversion"] = "1.0",
+            ["MY_VAR"] = "hello"
+        };
+
+        var projectElement = new XElement("Project");
+        MauiEnvironmentHelper.AddEnvironmentPropertyGroup(projectElement, envVars, NullLogger.Instance);
+
+        var properties = projectElement.Elements("PropertyGroup").Single().Elements().ToList();
+
+        var property = Assert.Single(properties);
+        Assert.Equal("MY_VAR", property.Name.LocalName);
+        Assert.Equal("hello", property.Value);
+    }
+
+    [Fact]
     public void AddEnvironmentPropertyGroup_EscapesMSBuildSyntaxInValues()
     {
         // Values containing MSBuild syntax must be surfaced literally, not expanded. MSBuild un-escapes the
