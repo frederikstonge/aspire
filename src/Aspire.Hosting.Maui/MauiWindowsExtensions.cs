@@ -3,6 +3,7 @@
 
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Maui;
+using Aspire.Hosting.Maui.Utilities;
 
 namespace Aspire.Hosting;
 
@@ -90,6 +91,8 @@ public static class MauiWindowsExtensions
 
         var resourceBuilder = builder.ApplicationBuilder.AddResource(windowsResource)
             .WithAnnotation(new MauiProjectMetadata(projectPath))
+            // Attached at creation so both the serialized pre-build and the launch command import the same file.
+            .WithAnnotation(MauiEnvironmentHelper.CreatePropsEnvironmentFilesAnnotation(builder.ApplicationBuilder, windowsResource, "windows"))
             .WithAnnotation(new ExecutableAnnotation
             {
                 Command = "dotnet",

@@ -56,6 +56,78 @@ internal static class MauiEnvironmentHelper
     }
 
     /// <summary>
+    /// Creates a lazy generator annotation for a resource's environment props file, capturing the services
+    /// needed to generate it at launch time. Unlike the Android and iOS variants, this produces only the
+    /// early-imported props file (no platform-specific targets file), so it fits platforms such as Windows
+    /// and Mac Catalyst that surface <c>WithEnvironment</c> values as MSBuild properties but do not need
+    /// extra platform launch item hooks.
+    /// </summary>
+    /// <remarks>
+    /// Attached at resource creation so both the serialized pre-build and the DCP launch command can share
+    /// the same generated file regardless of eventing order. See <see cref="MauiEnvironmentFilesAnnotation"/>.
+    /// </remarks>
+    public static MauiEnvironmentFilesAnnotation CreatePropsEnvironmentFilesAnnotation(IDistributedApplicationBuilder appBuilder, IResource resource, string platformMoniker)
+    {
+        var fileSystemService = appBuilder.FileSystemService;
+        var executionContext = appBuilder.ExecutionContext;
+        return new MauiEnvironmentFilesAnnotation((logger, ct) =>
+            CreatePropsEnvironmentFilesAsync(fileSystemService, resource, executionContext, platformMoniker, logger, ct));
+    }
+
+    /// <summary>
+    /// Creates the MSBuild props file that exposes a resource's environment variables to the project build
+    /// as MSBuild properties, without generating any platform-specific targets file.
+    /// </summary>
+    /// <param name="fileSystemService">The file system service for managing temp files.</param>
+    /// <param name="resource">The resource to collect environment variables from.</param>
+    /// <param name="executionContext">The execution context.</param>
+    /// <param name="platformMoniker">A short platform identifier (for example <c>windows</c> or <c>maccatalyst</c>) used to name the temp directory and generated file.</param>
+    /// <param name="logger">Logger for diagnostic output.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>
+    /// The path of the generated props file and a null targets path, or nulls if no environment variables are
+    /// present. The props file is meant to be imported early (via <c>CustomBeforeMicrosoftCommonProps</c>) so
+    /// its properties are visible to the project body.
+    /// </returns>
+    public static async Task<(string? PropsFilePath, string? TargetsFilePath)> CreatePropsEnvironmentFilesAsync(
+        IFileSystemService fileSystemService,
+        IResource resource,
+        DistributedApplicationExecutionContext executionContext,
+        string platformMoniker,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        var executionConfiguration = await ExecutionConfigurationBuilder.Create(resource)
+            .WithEnvironmentVariablesConfig()
+            .BuildAsync(executionContext, logger, cancellationToken)
+            .ConfigureAwait(false);
+
+        // If no environment variables, return nulls
+        if (!executionConfiguration.EnvironmentVariables.Any())
+        {
+            return (null, null);
+        }
+
+        var environmentVariables = executionConfiguration.EnvironmentVariables.ToDictionary();
+
+        // Create a temporary directory to hold the generated props file
+        var tempDirectory = fileSystemService.TempDirectory.CreateTempSubdirectory($"aspire-maui-{platformMoniker}-env").Path;
+
+        // Prune old generated files
+        PruneOldGeneratedFiles(tempDirectory, logger);
+
+        var sanitizedName = SanitizeFileName(resource.Name + "-" + platformMoniker);
+        var uniqueId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+
+        var propsFilePath = Path.Combine(tempDirectory, $"{sanitizedName}-{uniqueId}.props");
+        await File.WriteAllTextAsync(propsFilePath, GenerateEnvironmentPropsFileContent(environmentVariables, logger), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+
+        // No platform-specific targets file: Windows and Mac Catalyst consume the environment values through
+        // the early props import; only the Android/iOS launch tooling needs the extra targets item hooks.
+        return (propsFilePath, null);
+    }
+
+    /// <summary>
     /// Creates the MSBuild files that expose an Android resource's environment variables both to the
     /// project build (as properties) and to the Android launch tooling (as <c>AndroidEnvironment</c> items).
     /// </summary>

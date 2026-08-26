@@ -117,6 +117,50 @@ public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
         Assert.Contains(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task WindowsBuild_ImportsGeneratedProps()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempFile = Path.Combine(workspace.Path, "TempMauiProject.csproj");
+        File.WriteAllText(tempFile, MauiTestHelper.CreateProjectContent("net10.0-windows10.0.19041.0"));
+
+        var appBuilder = DistributedApplication.CreateBuilder();
+        var maui = appBuilder.AddMauiProject("mauiapp", tempFile);
+        var windows = maui.AddWindowsDevice()
+            .WithEnvironment("MY_VAR", "hello");
+
+        await using var app = appBuilder.Build();
+
+        var args = await GetBuildArgumentsAsync(windows.Resource);
+
+        // Windows surfaces WithEnvironment values as MSBuild properties via the early props import. It has no
+        // platform launch item hooks, so no targets file is generated.
+        Assert.Contains(args, a => a.StartsWith("-p:CustomBeforeMicrosoftCommonProps=", StringComparison.Ordinal));
+        Assert.DoesNotContain(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task MacCatalystBuild_ImportsGeneratedProps()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempFile = Path.Combine(workspace.Path, "TempMauiProject.csproj");
+        File.WriteAllText(tempFile, MauiTestHelper.CreateProjectContent("net10.0-maccatalyst"));
+
+        var appBuilder = DistributedApplication.CreateBuilder();
+        var maui = appBuilder.AddMauiProject("mauiapp", tempFile);
+        var macCatalyst = maui.AddMacCatalystDevice()
+            .WithEnvironment("MY_VAR", "hello");
+
+        await using var app = appBuilder.Build();
+
+        var args = await GetBuildArgumentsAsync(macCatalyst.Resource);
+
+        // Mac Catalyst surfaces WithEnvironment values as MSBuild properties via the early props import. It has
+        // no platform launch item hooks, so no targets file is generated.
+        Assert.Contains(args, a => a.StartsWith("-p:CustomBeforeMicrosoftCommonProps=", StringComparison.Ordinal));
+        Assert.DoesNotContain(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
+    }
+
     private static async Task<List<string>> GetBuildArgumentsAsync(IResource resource)
     {
         var buildInfo = resource.Annotations.OfType<MauiBuildInfoAnnotation>().Last();
