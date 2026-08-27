@@ -185,7 +185,7 @@ public class MauiEnvironmentHelperTests
     }
 
     [Fact]
-    public void GenerateEnvironmentPropsFileContent_ExposesEnvironmentVariablesAsProperties()
+    public void BuildEnvironmentPropertyArgs_ExposesEnvironmentVariablesAsProperties()
     {
         var envVars = new Dictionary<string, string>
         {
@@ -193,16 +193,12 @@ public class MauiEnvironmentHelperTests
             ["MY_VAR"] = "hello"
         };
 
-        var content = MauiEnvironmentHelper.GenerateEnvironmentPropsFileContent(envVars, NullLogger.Instance);
-        var doc = XDocument.Parse(content);
+        var args = MauiEnvironmentHelper.BuildEnvironmentPropertyArgs(envVars, NullLogger.Instance);
 
-        Assert.Equal("Project", doc.Root!.Name.LocalName);
-
-        // The file also contains a PropertyGroup that recovers the user's original
-        // CustomBeforeMicrosoftCommonProps; select the one that carries the environment variables.
-        var propertyGroup = doc.Root.Elements("PropertyGroup").Single(pg => pg.Element("MY_VAR") is not null);
-        Assert.Equal("hello", propertyGroup.Element("MY_VAR")?.Value);
-        Assert.Equal("http://localhost:4317", propertyGroup.Element("OTEL_EXPORTER_OTLP_ENDPOINT")?.Value);
+        // Emitted as global -p: properties in ordinal-ignore-case key order.
+        Assert.Equal(
+            new[] { "-p:MY_VAR=hello", "-p:OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317" },
+            args);
     }
 
     [Fact]

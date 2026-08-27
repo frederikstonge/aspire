@@ -55,6 +55,14 @@ internal class MauiBuildQueueEventSubscriber(
         var parent = mauiResource.Parent;
         var logger = loggerService.GetLogger(resource);
 
+        // Environment values are re-resolved on every launch (they can change between a stop and a restart),
+        // so drop any files cached from a previous start. This launch's pre-build regenerates them and the
+        // later DCP Run launch command reuses the same freshly generated files.
+        if (resource.TryGetLastAnnotation<MauiEnvironmentFilesAnnotation>(out var envFilesAnnotation))
+        {
+            envFilesAnnotation.Invalidate();
+        }
+
         if (!parent.TryGetLastAnnotation<MauiBuildQueueAnnotation>(out var queueAnnotation))
         {
             return;
@@ -130,9 +138,9 @@ internal class MauiBuildQueueEventSubscriber(
     }
 
     /// <summary>
-    /// Builds the <c>dotnet build</c> argument list, appending the environment MSBuild files when present so
+    /// Builds the <c>dotnet build</c> argument list, appending the environment MSBuild inputs when present so
     /// that <c>WithEnvironment</c> values influence the actual compilation (build-time conditions/properties
-    /// and, for Android, the <c>AndroidEnvironment</c> items baked into the app). The same cached files are
+    /// and, for Android, the <c>AndroidEnvironment</c> items baked into the app). The same cached inputs are
     /// reused by the no-build Run launch command via the environment subscriber's command-line callback.
     /// </summary>
     internal static async Task<List<string>> BuildDotnetBuildArgumentsAsync(IResource resource, MauiBuildInfoAnnotation buildInfo, ILogger logger, CancellationToken cancellationToken)
@@ -155,14 +163,13 @@ internal class MauiBuildQueueEventSubscriber(
 
         if (resource.TryGetLastAnnotation<MauiEnvironmentFilesAnnotation>(out var envFiles))
         {
-            var (propsFilePath, targetsFilePath) = await envFiles.GetOrCreateAsync(logger, cancellationToken).ConfigureAwait(false);
+            var (propertyArgs, targetsFilePath) = await envFiles.GetOrCreateAsync(logger, cancellationToken).ConfigureAwait(false);
 
-            // Imported early (before the project body) so environment values are visible to project-level
-            // property definitions and conditions.
-            if (propsFilePath is not null)
-            {
-                args.Add($"-p:CustomBeforeMicrosoftCommonProps={propsFilePath}");
-            }
+            // Passed as global MSBuild properties (rather than importing a props file via the single
+            // CustomBeforeMicrosoftCommonProps slot) so the user's own props extension is preserved. Global
+            // properties are evaluated before any import, so they are visible to project-level property
+            // definitions and conditions.
+            args.AddRange(propertyArgs);
 
             // Imported late so platform launch item hooks run after the common targets have defined them.
             if (targetsFilePath is not null)

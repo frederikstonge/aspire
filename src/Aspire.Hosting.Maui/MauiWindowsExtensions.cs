@@ -92,7 +92,7 @@ public static class MauiWindowsExtensions
         var resourceBuilder = builder.ApplicationBuilder.AddResource(windowsResource)
             .WithAnnotation(new MauiProjectMetadata(projectPath))
             // Attached at creation; consumed only by the serialized pre-build (Windows has no launch-command callback).
-            .WithAnnotation(MauiEnvironmentHelper.CreatePropsEnvironmentFilesAnnotation(builder.ApplicationBuilder, windowsResource, "windows"))
+            .WithAnnotation(MauiEnvironmentHelper.CreateEnvironmentPropertyArgsAnnotation(builder.ApplicationBuilder, windowsResource))
             .WithAnnotation(new ExecutableAnnotation
             {
                 Command = "dotnet",

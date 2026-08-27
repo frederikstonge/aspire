@@ -56,44 +56,38 @@ internal static class MauiEnvironmentHelper
     }
 
     /// <summary>
-    /// Creates a lazy generator annotation for a resource's environment props file, capturing the services
-    /// needed to generate it at launch time. Unlike the Android and iOS variants, this produces only the
-    /// early-imported props file (no platform-specific targets file), so it fits platforms such as Windows
-    /// and Mac Catalyst that surface <c>WithEnvironment</c> values as MSBuild properties but do not need
-    /// extra platform launch item hooks.
+    /// Creates a lazy generator annotation for a resource's environment properties, capturing the services
+    /// needed to resolve them at launch time. Unlike the Android and iOS variants, this produces only the
+    /// global MSBuild property arguments (no platform-specific targets file), so it fits platforms such as
+    /// Windows and Mac Catalyst that surface <c>WithEnvironment</c> values as MSBuild properties but do not
+    /// need extra platform launch item hooks.
     /// </summary>
     /// <remarks>
     /// Attached at resource creation. Unlike Android and iOS, these platforms have no launch-command callback,
-    /// so only the serialized pre-build consumes the generated props file. See <see cref="MauiEnvironmentFilesAnnotation"/>.
+    /// so only the serialized pre-build consumes the generated properties. See <see cref="MauiEnvironmentFilesAnnotation"/>.
     /// </remarks>
-    public static MauiEnvironmentFilesAnnotation CreatePropsEnvironmentFilesAnnotation(IDistributedApplicationBuilder appBuilder, IResource resource, string platformMoniker)
+    public static MauiEnvironmentFilesAnnotation CreateEnvironmentPropertyArgsAnnotation(IDistributedApplicationBuilder appBuilder, IResource resource)
     {
-        var fileSystemService = appBuilder.FileSystemService;
         var executionContext = appBuilder.ExecutionContext;
         return new MauiEnvironmentFilesAnnotation((logger, ct) =>
-            CreatePropsEnvironmentFilesAsync(fileSystemService, resource, executionContext, platformMoniker, logger, ct));
+            CreateEnvironmentPropertyArgsAsync(resource, executionContext, logger, ct));
     }
 
     /// <summary>
-    /// Creates the MSBuild props file that exposes a resource's environment variables to the project build
-    /// as MSBuild properties, without generating any platform-specific targets file.
+    /// Resolves a resource's environment variables into global MSBuild property arguments, without generating
+    /// any platform-specific targets file.
     /// </summary>
-    /// <param name="fileSystemService">The file system service for managing temp files.</param>
     /// <param name="resource">The resource to collect environment variables from.</param>
     /// <param name="executionContext">The execution context.</param>
-    /// <param name="platformMoniker">A short platform identifier (for example <c>windows</c> or <c>maccatalyst</c>) used to name the temp directory and generated file.</param>
     /// <param name="logger">Logger for diagnostic output.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>
-    /// The path of the generated props file and a null targets path, or nulls if no environment variables are
-    /// present. The props file is meant to be imported early (via <c>CustomBeforeMicrosoftCommonProps</c>) so
-    /// its properties are visible to the project body.
+    /// The <c>-p:NAME=VALUE</c> arguments exposing the environment variables as MSBuild properties and a null
+    /// targets path, or an empty list if no environment variables are present.
     /// </returns>
-    public static async Task<(string? PropsFilePath, string? TargetsFilePath)> CreatePropsEnvironmentFilesAsync(
-        IFileSystemService fileSystemService,
+    public static async Task<(IReadOnlyList<string> PropertyArgs, string? TargetsFilePath)> CreateEnvironmentPropertyArgsAsync(
         IResource resource,
         DistributedApplicationExecutionContext executionContext,
-        string platformMoniker,
         ILogger logger,
         CancellationToken cancellationToken)
     {
@@ -102,29 +96,15 @@ internal static class MauiEnvironmentHelper
             .BuildAsync(executionContext, logger, cancellationToken)
             .ConfigureAwait(false);
 
-        // If no environment variables, return nulls
         if (!executionConfiguration.EnvironmentVariables.Any())
         {
-            return (null, null);
+            return (Array.Empty<string>(), null);
         }
 
         var environmentVariables = executionConfiguration.EnvironmentVariables.ToDictionary();
 
-        // Create a temporary directory to hold the generated props file
-        var tempDirectory = fileSystemService.TempDirectory.CreateTempSubdirectory($"aspire-maui-{platformMoniker}-env").Path;
-
-        // Prune old generated files
-        PruneOldGeneratedFiles(tempDirectory, logger);
-
-        var sanitizedName = SanitizeFileName(resource.Name + "-" + platformMoniker);
-        var uniqueId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
-
-        var propsFilePath = Path.Combine(tempDirectory, $"{sanitizedName}-{uniqueId}.props");
-        await File.WriteAllTextAsync(propsFilePath, GenerateEnvironmentPropsFileContent(environmentVariables, logger), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
-
-        // No platform-specific targets file: Windows and Mac Catalyst consume the environment values through
-        // the early props import; only the Android/iOS launch tooling needs the extra targets item hooks.
-        return (propsFilePath, null);
+        // Windows and Mac Catalyst have no platform launch item hooks, so only the global properties are needed.
+        return (BuildEnvironmentPropertyArgs(environmentVariables, logger), null);
     }
 
     /// <summary>
@@ -137,12 +117,12 @@ internal static class MauiEnvironmentHelper
     /// <param name="logger">Logger for diagnostic output.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>
-    /// The paths of the generated props and targets files, or nulls if no environment variables are present.
-    /// The props file is meant to be imported early (via <c>CustomBeforeMicrosoftCommonProps</c>) so its
-    /// properties are visible to the project body; the targets file is imported late (via
-    /// <c>CustomAfterMicrosoftCommonTargets</c>) so the Android launch item hooks run after the common targets.
+    /// The <c>-p:NAME=VALUE</c> arguments exposing the environment variables as MSBuild properties and the path
+    /// of the generated targets file, or an empty list and null if no environment variables are present. The
+    /// targets file is imported late (via <c>CustomAfterMicrosoftCommonTargets</c>) so the Android launch item
+    /// hooks run after the common targets.
     /// </returns>
-    public static async Task<(string? PropsFilePath, string? TargetsFilePath)> CreateAndroidEnvironmentFilesAsync(
+    public static async Task<(IReadOnlyList<string> PropertyArgs, string? TargetsFilePath)> CreateAndroidEnvironmentFilesAsync(
         IFileSystemService fileSystemService,
         IResource resource,
         DistributedApplicationExecutionContext executionContext,
@@ -165,28 +145,23 @@ internal static class MauiEnvironmentHelper
             environmentVariables[normalizedKey] = envVar.Value;
         }
 
-        // If no environment variables, return nulls
+        // If no environment variables, return an empty result
         if (environmentVariables.Count == 0)
         {
-            return (null, null);
+            return (Array.Empty<string>(), null);
         }
 
-        // Create a temporary directory to hold the generated props and targets files
+        // Create a temporary directory to hold the generated targets file. The directory is tracked by the
+        // file system service and removed on app shutdown (honoring ASPIRE_PRESERVE_TEMP_FILES).
         var tempDirectory = fileSystemService.TempDirectory.CreateTempSubdirectory("aspire-maui-android-env").Path;
-
-        // Prune old generated files
-        PruneOldGeneratedFiles(tempDirectory, logger);
 
         var sanitizedName = SanitizeFileName(resource.Name + "-android");
         var uniqueId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
 
-        var propsFilePath = Path.Combine(tempDirectory, $"{sanitizedName}-{uniqueId}.props");
-        await File.WriteAllTextAsync(propsFilePath, GenerateEnvironmentPropsFileContent(environmentVariables, logger), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
-
         var targetsFilePath = Path.Combine(tempDirectory, $"{sanitizedName}-{uniqueId}.targets");
         await File.WriteAllTextAsync(targetsFilePath, GenerateAndroidTargetsFileContent(environmentVariables), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
 
-        return (propsFilePath, targetsFilePath);
+        return (BuildEnvironmentPropertyArgs(environmentVariables, logger), targetsFilePath);
     }
 
     /// <summary>
@@ -252,51 +227,6 @@ internal static class MauiEnvironmentHelper
         return SerializeProject(projectElement);
     }
 
-    private static void PruneOldGeneratedFiles(string directory, ILogger logger)
-    {
-        // Each run creates a brand-new unique subdirectory via CreateTempSubdirectory, so `directory` itself
-        // is empty and never holds stale artifacts. Leftovers from prior (including crashed) runs live in
-        // *sibling* directories under the shared temp root, so prune those instead by scanning the parent.
-        var parent = Directory.GetParent(directory)?.FullName;
-        if (parent is null)
-        {
-            return;
-        }
-
-        var expiration = DateTimeOffset.UtcNow - TimeSpan.FromDays(1);
-        var deletedDirectories = new List<string>();
-
-        // All of this helper's temp subdirectories are created with an "aspire-maui-" prefix
-        // (e.g. aspire-maui-android-env, aspire-maui-mlaunch-env, aspire-maui-windows-env), so match that.
-        foreach (var siblingDirectory in Directory.EnumerateDirectories(parent, "aspire-maui-*", SearchOption.TopDirectoryOnly))
-        {
-            // Never delete the directory that was just created for the current run.
-            if (string.Equals(Path.GetFullPath(siblingDirectory), Path.GetFullPath(directory), StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            try
-            {
-                var info = new DirectoryInfo(siblingDirectory);
-                if (info.Exists && info.LastWriteTimeUtc < expiration)
-                {
-                    info.Delete(recursive: true);
-                    deletedDirectories.Add(info.Name);
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.LogDebug(ex, "Failed to prune stale MAUI environment directory '{Directory}'.", siblingDirectory);
-            }
-        }
-
-        if (deletedDirectories.Count > 0)
-        {
-            logger.LogDebug("Pruned {Count} stale MAUI environment directory(ies): {Directories}", deletedDirectories.Count, string.Join(", ", deletedDirectories));
-        }
-    }
-
     internal static string SanitizeFileName(string name)
     {
         var invalidCharacters = Path.GetInvalidFileNameChars();
@@ -318,43 +248,23 @@ internal static class MauiEnvironmentHelper
     }
 
     /// <summary>
-    /// Generates the content of an MSBuild <c>.props</c> file that exposes the environment variables as
-    /// MSBuild properties. This file is imported early (via <c>CustomBeforeMicrosoftCommonProps</c>) so the
-    /// values are visible to project-level property definitions and conditions, unlike the late
-    /// <c>.targets</c> import which only carries the platform launch items.
+    /// Builds the <c>-p:NAME=VALUE</c> MSBuild command-line arguments that expose the environment variables as
+    /// MSBuild properties. Global (command-line) properties are used instead of a generated props file imported
+    /// through <c>CustomBeforeMicrosoftCommonProps</c>: that slot is a single-file extension point, so claiming
+    /// it would replace (and there is no reliable way to recover) a user-supplied value — for example one set in
+    /// a <c>Directory.Build.rsp</c> response file, which becomes an opaque global property. Global properties are
+    /// also evaluated before any import, so the values are visible to project-level property definitions and
+    /// conditions just like an early props import would be.
     /// </summary>
-    internal static string GenerateEnvironmentPropsFileContent(Dictionary<string, string> environmentVariables, ILogger logger)
+    internal static List<string> BuildEnvironmentPropertyArgs(Dictionary<string, string> environmentVariables, ILogger logger)
     {
-        var projectElement = new XElement("Project");
+        var args = new List<string>();
+        foreach (var (name, value) in EnumerateEmittableProperties(environmentVariables, logger))
+        {
+            args.Add($"-p:{name}={value}");
+        }
 
-        // We claim the single CustomBeforeMicrosoftCommonProps extension slot by passing -p: on the command
-        // line, which is a global property and therefore overrides (and hides) any value the user supplied
-        // via the environment or a response file. To avoid silently dropping a user-provided extension file,
-        // recover and chain the original value here.
-        //
-        // The value is read with GetEnvironmentVariable rather than $(CustomBeforeMicrosoftCommonProps)
-        // because the latter already resolves to *this* generated file (that is how we got imported); the raw
-        // environment variable is not shadowed by the global -p: property, so it still exposes the user's
-        // original path. If the user set nothing, fall back to MSBuild's conventional default extension file,
-        // which is exactly what MSBuild would have imported into this slot on its own.
-        const string originalPropName = "_AspireOriginalCustomBeforeMicrosoftCommonProps";
-        const string conventionalDefault = "$(MSBuildExtensionsPath)/v$(MSBuildToolsVersion)/Custom.Before.Microsoft.Common.props";
-
-        projectElement.Add(new XElement(
-            "PropertyGroup",
-            new XElement(originalPropName, "$([System.Environment]::GetEnvironmentVariable('CustomBeforeMicrosoftCommonProps'))"),
-            new XElement(originalPropName, new XAttribute("Condition", $"'$({originalPropName})' == ''"), conventionalDefault)
-        ));
-
-        projectElement.Add(new XElement(
-            "Import",
-            new XAttribute("Project", $"$({originalPropName})"),
-            new XAttribute("Condition", $"'$({originalPropName})' != '' and Exists('$({originalPropName})')")
-        ));
-
-        AddEnvironmentPropertyGroup(projectElement, environmentVariables, logger);
-
-        return SerializeProject(projectElement);
+        return args;
     }
 
     // MSBuild's reserved (read-only) property names. Defining any of these in a project file throws MSB4004
@@ -398,30 +308,50 @@ internal static class MauiEnvironmentHelper
     /// references or property conditions), not just to the platform launch tooling.
     /// </summary>
     /// <remarks>
-    /// Environment variable names are encoded to valid MSBuild property identifiers via
-    /// <see cref="EnvironmentVariableNameEncoder.Encode(string)"/>: names that are already valid are used
-    /// unchanged, otherwise invalid characters are replaced with '_'. Because that encoding (and MSBuild's
-    /// case-insensitive property names) can map two distinct variables to the same property name, collisions
-    /// are detected and only the first variable is emitted; the rest are logged rather than silently
-    /// overwriting each other. Names that map to a reserved MSBuild property are skipped (and logged) so they
-    /// do not fail the build with MSB4004. Values are escaped via <see cref="EscapeMSBuildPropertyValue"/> so
-    /// MSBuild syntax in a value (such as <c>$(Configuration)</c>) is preserved literally instead of
-    /// expanding; XML special characters are escaped automatically by <see cref="XElement"/>.
+    /// The emitted names/values follow the rules described on <see cref="EnumerateEmittableProperties"/>.
+    /// XML special characters in the value are escaped automatically by <see cref="XElement"/>.
     /// </remarks>
     internal static void AddEnvironmentPropertyGroup(XElement projectElement, Dictionary<string, string> environmentVariables, ILogger logger)
     {
         var propertyGroup = new XElement("PropertyGroup");
 
-        // MSBuild property names are case-insensitive, and Encode maps invalid characters to '_', so two
-        // distinct variables can collide (e.g. "services:api:0" and "services_api_0", or "Foo" and "FOO").
-        // Track emitted names case-insensitively and skip later collisions so MSBuild does not silently take
-        // the last definition. The colliding variables still reach the app via the launch items, which use
-        // the original (unencoded) names.
+        foreach (var (name, value) in EnumerateEmittableProperties(environmentVariables, logger))
+        {
+            propertyGroup.Add(new XElement(name, value));
+        }
+
+        projectElement.Add(propertyGroup);
+    }
+
+    /// <summary>
+    /// Yields the encoded property name and escaped value for each environment variable that can be surfaced
+    /// as an MSBuild property, in a stable ordinal-ignore-case order.
+    /// </summary>
+    /// <remarks>
+    /// Environment variable names are encoded to valid MSBuild property identifiers via
+    /// <see cref="EncodeMSBuildPropertyName(string)"/>: names that are already valid are used unchanged,
+    /// otherwise invalid characters are replaced with '_'. Unlike a plain environment-variable encoder this
+    /// keeps hyphens, because MSBuild allows '-' after the first character of a property name (for example
+    /// <c>$(MY-VAR)</c>), so a hyphenated variable maps to the matching property instead of collapsing to an
+    /// underscore. Because that encoding (and MSBuild's case-insensitive property names) can still map two
+    /// distinct variables to the same property name, collisions are detected and only the first variable is
+    /// emitted; the rest are logged rather than silently overwriting each other. Names that map to a reserved
+    /// MSBuild property are skipped (and logged) so they do not fail the build with MSB4004. Values are escaped
+    /// via <see cref="EscapeMSBuildPropertyValue"/> so MSBuild syntax in a value (such as
+    /// <c>$(Configuration)</c>) is preserved literally instead of expanding.
+    /// </remarks>
+    internal static IEnumerable<(string Name, string Value)> EnumerateEmittableProperties(Dictionary<string, string> environmentVariables, ILogger logger)
+    {
+        // MSBuild property names are case-insensitive, and EncodeMSBuildPropertyName maps invalid characters
+        // to '_', so two distinct variables can collide (e.g. "services:api:0" and "services_api_0", or "Foo"
+        // and "FOO"). Track emitted names case-insensitively and skip later collisions so MSBuild does not
+        // silently take the last definition. The colliding variables still reach the app via the launch items,
+        // which use the original (unencoded) names.
         var emittedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (key, value) in environmentVariables.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
         {
-            var propertyName = EnvironmentVariableNameEncoder.Encode(key);
+            var propertyName = EncodeMSBuildPropertyName(key);
 
             // An empty encoded name only occurs for an empty key, which cannot form a valid MSBuild
             // property (or XML element) name, so skip it.
@@ -453,10 +383,41 @@ internal static class MauiEnvironmentHelper
                 continue;
             }
 
-            propertyGroup.Add(new XElement(propertyName, EscapeMSBuildPropertyValue(value)));
+            yield return (propertyName, EscapeMSBuildPropertyValue(value));
+        }
+    }
+
+    /// <summary>
+    /// Encodes an environment variable name into a valid MSBuild property name.
+    /// </summary>
+    /// <remarks>
+    /// MSBuild property names must start with a letter or underscore and may then contain letters, digits,
+    /// underscores and hyphens (for example <c>$(MY-VAR)</c> is valid). Unlike a plain environment-variable
+    /// encoder, hyphens are preserved so a hyphenated variable maps to the matching MSBuild property rather
+    /// than collapsing to '_' (which could collide with a differently spelled variable). Any other character
+    /// is replaced with '_', and a leading character that is not a letter or underscore is prefixed with '_'.
+    /// </remarks>
+    internal static string EncodeMSBuildPropertyName(string name)
+    {
+        if (string.IsNullOrEmpty(name))
+        {
+            return name;
         }
 
-        projectElement.Add(propertyGroup);
+        var builder = new StringBuilder(name.Length + 1);
+
+        // A valid MSBuild property name cannot start with a digit or hyphen, so prefix '_' when it would.
+        if (!char.IsAsciiLetter(name[0]) && name[0] != '_')
+        {
+            builder.Append('_');
+        }
+
+        foreach (var c in name)
+        {
+            builder.Append(char.IsAsciiLetterOrDigit(c) || c is '_' or '-' ? c : '_');
+        }
+
+        return builder.ToString();
     }
 
     internal static string EncodeMSBuildItemValue(string value, out bool wasEncoded)
@@ -544,12 +505,12 @@ internal static class MauiEnvironmentHelper
     /// <param name="logger">Logger for diagnostic output.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>
-    /// The paths of the generated props and targets files, or nulls if no environment variables are present.
-    /// The props file is meant to be imported early (via <c>CustomBeforeMicrosoftCommonProps</c>) so its
-    /// properties are visible to the project body; the targets file is imported late (via
-    /// <c>CustomAfterMicrosoftCommonTargets</c>) so the mlaunch item hooks run after the common targets.
+    /// The <c>-p:NAME=VALUE</c> arguments exposing the environment variables as MSBuild properties and the path
+    /// of the generated targets file, or an empty list and null if no environment variables are present. The
+    /// targets file is imported late (via <c>CustomAfterMicrosoftCommonTargets</c>) so the mlaunch item hooks
+    /// run after the common targets.
     /// </returns>
-    public static async Task<(string? PropsFilePath, string? TargetsFilePath)> CreateiOSEnvironmentFilesAsync(
+    public static async Task<(IReadOnlyList<string> PropertyArgs, string? TargetsFilePath)> CreateiOSEnvironmentFilesAsync(
         IFileSystemService fileSystemService,
         IResource resource,
         DistributedApplicationExecutionContext executionContext,
@@ -561,30 +522,25 @@ internal static class MauiEnvironmentHelper
             .BuildAsync(executionContext, logger, cancellationToken)
             .ConfigureAwait(false);
 
-        // If no environment variables, return nulls
+        // If no environment variables, return an empty result
         if (!executionConfiguration.EnvironmentVariables.Any())
         {
-            return (null, null);
+            return (Array.Empty<string>(), null);
         }
 
         var environmentVariables = executionConfiguration.EnvironmentVariables.ToDictionary();
 
-        // Create a temporary directory to hold the generated props and targets files
+        // Create a temporary directory to hold the generated targets file. The directory is tracked by the
+        // file system service and removed on app shutdown (honoring ASPIRE_PRESERVE_TEMP_FILES).
         var tempDirectory = fileSystemService.TempDirectory.CreateTempSubdirectory("aspire-maui-mlaunch-env").Path;
-
-        // Prune old generated files
-        PruneOldGeneratedFiles(tempDirectory, logger);
 
         var sanitizedName = SanitizeFileName(resource.Name + "-ios");
         var uniqueId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
 
-        var propsFilePath = Path.Combine(tempDirectory, $"{sanitizedName}-{uniqueId}.props");
-        await File.WriteAllTextAsync(propsFilePath, GenerateEnvironmentPropsFileContent(environmentVariables, logger), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
-
         var targetsFilePath = Path.Combine(tempDirectory, $"{sanitizedName}-{uniqueId}.targets");
         await File.WriteAllTextAsync(targetsFilePath, GenerateiOSTargetsFileContent(environmentVariables), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
 
-        return (propsFilePath, targetsFilePath);
+        return (BuildEnvironmentPropertyArgs(environmentVariables, logger), targetsFilePath);
     }
 
     /// <summary>

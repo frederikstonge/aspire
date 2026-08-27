@@ -72,10 +72,10 @@ internal sealed class MauiAndroidEnvironmentSubscriber(
 
         try
         {
-            // Add a CommandLineArgsCallback that appends the generated MSBuild files to the DCP launch
-            // command. The files themselves are produced by the MauiEnvironmentFilesAnnotation attached at
+            // Add a CommandLineArgsCallback that appends the environment MSBuild inputs to the DCP launch
+            // command. The inputs themselves are produced by the MauiEnvironmentFilesAnnotation attached at
             // resource creation, which caches them so the serialized pre-build and this launch share the
-            // exact same paths regardless of subscriber ordering.
+            // exact same values regardless of subscriber ordering.
             resource.Annotations.Add(new CommandLineArgsCallbackAnnotation(async context =>
             {
                 if (!resource.TryGetLastAnnotation<MauiEnvironmentFilesAnnotation>(out var envFiles))
@@ -83,13 +83,14 @@ internal sealed class MauiAndroidEnvironmentSubscriber(
                     return;
                 }
 
-                var (propsFilePath, targetsFilePath) = await envFiles.GetOrCreateAsync(context.Logger, context.CancellationToken).ConfigureAwait(false);
+                var (propertyArgs, targetsFilePath) = await envFiles.GetOrCreateAsync(context.Logger, context.CancellationToken).ConfigureAwait(false);
 
-                // The props file is imported early (before the project body) so the environment values are
-                // visible to project-level property definitions and conditions.
-                if (propsFilePath is not null)
+                // Passed as global MSBuild properties (rather than importing a props file via the single
+                // CustomBeforeMicrosoftCommonProps slot) so the user's own props extension is preserved.
+                // Global properties are visible to project-level property definitions and conditions.
+                foreach (var propertyArg in propertyArgs)
                 {
-                    context.Args.Add($"-p:CustomBeforeMicrosoftCommonProps={propsFilePath}");
+                    context.Args.Add(propertyArg);
                 }
 
                 // The targets file is imported late so the AndroidEnvironment launch item hooks run after

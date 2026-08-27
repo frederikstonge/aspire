@@ -15,9 +15,9 @@ namespace Aspire.Hosting.Tests;
 
 /// <summary>
 /// Regression tests for the MAUI environment subscribers. Unlike <see cref="MauiEnvironmentHelperTests"/>,
-/// which only inspects the helper-generated XML, these tests drive the subscriber's command-line callback so
-/// that a regression which stops importing the generated files (for example dropping the
-/// <c>CustomBeforeMicrosoftCommonProps</c> argument) is caught.
+/// which only inspects the helper output, these tests drive the subscriber's command-line callback so that a
+/// regression which stops passing the injected environment values (as global <c>-p:</c> properties) or which
+/// starts stealing the user's <c>CustomBeforeMicrosoftCommonProps</c> slot is caught.
 /// </summary>
 public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
 {
@@ -43,10 +43,10 @@ public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
 
         var args = await ArgumentEvaluator.GetArgumentListAsync(android.Resource);
 
-        // The props file must be imported early (before the project body) and the targets file late; both
-        // are required for the injected environment values to reach the build and the launch tooling.
-        Assert.Contains(args, a => a.StartsWith("-p:CustomBeforeMicrosoftCommonProps=", StringComparison.Ordinal));
-        Assert.Contains(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
+        // Environment values are passed as global MSBuild properties (never via the CustomBeforeMicrosoftCommonProps
+        // slot); the targets file is still imported late so the Android launch items reach the build.
+        Assert.Contains("-p:MY_VAR=hello", args);
+        Assert.Equal(new[] { "-p:CustomAfterMicrosoftCommonTargets" }, GetCustomImportArgKeys(args));
     }
 
     [Fact]
@@ -71,8 +71,10 @@ public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
 
         var args = await ArgumentEvaluator.GetArgumentListAsync(ios.Resource);
 
-        Assert.Contains(args, a => a.StartsWith("-p:CustomBeforeMicrosoftCommonProps=", StringComparison.Ordinal));
-        Assert.Contains(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
+        // Environment values are passed as global MSBuild properties (never via the CustomBeforeMicrosoftCommonProps
+        // slot); the targets file is still imported late so the mlaunch launch items reach the build.
+        Assert.Contains("-p:MY_VAR=hello", args);
+        Assert.Equal(new[] { "-p:CustomAfterMicrosoftCommonTargets" }, GetCustomImportArgKeys(args));
     }
 
     [Fact]
@@ -91,10 +93,11 @@ public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
 
         var args = await GetBuildArgumentsAsync(android.Resource);
 
-        // The actual `dotnet build` (not just the launch command) must import the generated files, otherwise
-        // build-time conditions and Android environment items never see WithEnvironment values.
-        Assert.Contains(args, a => a.StartsWith("-p:CustomBeforeMicrosoftCommonProps=", StringComparison.Ordinal));
-        Assert.Contains(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
+        // The actual `dotnet build` (not just the launch command) must carry the environment values as global
+        // properties and import the targets file, otherwise build-time conditions and Android environment items
+        // never see WithEnvironment values.
+        Assert.Contains("-p:MY_VAR=hello", args);
+        Assert.Equal(new[] { "-p:CustomAfterMicrosoftCommonTargets" }, GetCustomImportArgKeys(args));
     }
 
     [Fact]
@@ -113,8 +116,8 @@ public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
 
         var args = await GetBuildArgumentsAsync(ios.Resource);
 
-        Assert.Contains(args, a => a.StartsWith("-p:CustomBeforeMicrosoftCommonProps=", StringComparison.Ordinal));
-        Assert.Contains(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
+        Assert.Contains("-p:MY_VAR=hello", args);
+        Assert.Equal(new[] { "-p:CustomAfterMicrosoftCommonTargets" }, GetCustomImportArgKeys(args));
     }
 
     [Fact]
@@ -133,10 +136,10 @@ public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
 
         var args = await GetBuildArgumentsAsync(windows.Resource);
 
-        // Windows surfaces WithEnvironment values as MSBuild properties via the early props import. It has no
-        // platform launch item hooks, so no targets file is generated.
-        Assert.Contains(args, a => a.StartsWith("-p:CustomBeforeMicrosoftCommonProps=", StringComparison.Ordinal));
-        Assert.DoesNotContain(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
+        // Windows surfaces WithEnvironment values as global MSBuild properties. It has no platform launch item
+        // hooks, so no targets file is generated and the user's props extension slot is never touched.
+        Assert.Contains("-p:MY_VAR=hello", args);
+        Assert.Empty(GetCustomImportArgKeys(args));
     }
 
     [Fact]
@@ -155,10 +158,10 @@ public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
 
         var args = await GetBuildArgumentsAsync(macCatalyst.Resource);
 
-        // Mac Catalyst surfaces WithEnvironment values as MSBuild properties via the early props import. It has
-        // no platform launch item hooks, so no targets file is generated.
-        Assert.Contains(args, a => a.StartsWith("-p:CustomBeforeMicrosoftCommonProps=", StringComparison.Ordinal));
-        Assert.DoesNotContain(args, a => a.StartsWith("-p:CustomAfterMicrosoftCommonTargets=", StringComparison.Ordinal));
+        // Mac Catalyst surfaces WithEnvironment values as global MSBuild properties. It has no platform launch
+        // item hooks, so no targets file is generated and the user's props extension slot is never touched.
+        Assert.Contains("-p:MY_VAR=hello", args);
+        Assert.Empty(GetCustomImportArgKeys(args));
     }
 
     private static async Task<List<string>> GetBuildArgumentsAsync(IResource resource)
@@ -166,6 +169,15 @@ public class MauiEnvironmentSubscriberTests(ITestOutputHelper outputHelper)
         var buildInfo = resource.Annotations.OfType<MauiBuildInfoAnnotation>().Last();
         return await MauiBuildQueueEventSubscriber.BuildDotnetBuildArgumentsAsync(resource, buildInfo, NullLogger.Instance, CancellationToken.None);
     }
+
+    // Returns the ordered set of "-p:Custom..." MSBuild extension-import argument keys (without their
+    // generated file paths) so tests can assert the complete set of imports rather than an absence.
+    private static string[] GetCustomImportArgKeys(IEnumerable<string> args) =>
+        args
+            .Where(a => a.StartsWith("-p:Custom", StringComparison.Ordinal))
+            .Select(a => a.Split('=', 2)[0])
+            .OrderBy(a => a, StringComparer.Ordinal)
+            .ToArray();
 
     private static async Task PublishBeforeResourceStartedAsync(
         DistributedApplication app,
